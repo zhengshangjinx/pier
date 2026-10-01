@@ -1,0 +1,355 @@
+// Package config 定义并加载 Pier 的服务清单。
+//
+// 清单描述「哪些目录、算什么类型、怎么起、占哪个端口」。它平时存在 Pier 自己的
+// 数据文件里（见 store.go），由界面编辑；YAML 清单只在命令行用 --config 显式指定时出现，只读。
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// 服务类型。不论哪种类型，启动最终都归结为「可选编译 + 运行」两步，
+// Kind 只决定这两步如何推断，以及需要注入哪套工具链环境。
+const (
+	KindGo     = "go"
+	KindJava   = "java"
+	KindNode   = "node"
+	KindPython = "python"
+	KindShell  = "shell"
+)
+
+// DefaultConfigName 是向上查找配置时使用的文件名。
+const DefaultConfigName = "pier.yaml"
+
+// DefaultScript 是 Node 服务未指定 script 时使用的 package.json 脚本名。
+const DefaultScript = "dev"
+
+// UngroupedName 是没写 group 的服务在界面上的分组名。
+// 分组完全由清单里的 group 字段决定，不按目录、不按类型猜——
+// 猜出来的分组看着聪明，但一旦猜错，用户没有任何地方能把它改回来。
+const UngroupedName = "未分组"
+
+// Service 是一个可启停的服务定义。
+type Service struct {
+	// Name 是服务的唯一标识，也是 up/down/logs 等命令使用的名字。
+	Name string `yaml:"name" json:"name"`
+	// Dir 是服务工作目录，相对配置文件所在目录；必须是绝对路径或相对路径，不支持 ~。
+	Dir string `yaml:"dir" json:"dir"`
+	// Group 是面板里的分组名；留空归入「未分组」。
+	Group string `yaml:"group" json:"group,omitempty"`
+	// Note 是给人看的自由备注，面板上原样显示，Pier 不解释它的内容。
+	Note string `yaml:"note" json:"note,omitempty"`
+	// Kind 取 KindGo/KindJava/KindNode/KindPython/KindShell；留空则按目录内容自动识别。
+	Kind string `yaml:"kind" json:"kind,omitempty"`
+	// Run 显式指定启动命令；留空则按 Kind 推断。
+	Run string `yaml:"run" json:"run,omitempty"`
+	// Build 显式指定编译命令；留空则按 Kind 推断（Node/Python 默认不编译）。
+	Build string `yaml:"build" json:"build,omitempty"`
+	// Module 是 Maven 子模块名（如 shop-admin），Java 服务用它定位要跑哪个模块。
+	Module string `yaml:"module" json:"module,omitempty"`
+	// Script 是 package.json 里的脚本名，Node 服务用它决定跑哪个脚本。
+	Script string `yaml:"script" json:"script,omitempty"`
+	// Port 是该服务监听的端口，用于状态展示与占用检测；可选。
+	Port int `yaml:"port" json:"port,omitempty"`
+	// Health 是就绪探针 URL，如 http://localhost:20351/admin/health；可选。
+	Health string `yaml:"health" json:"health,omitempty"`
+	// Env 是追加到进程环境的变量，优先级高于继承来的环境。
+	Env map[string]string `yaml:"env" json:"env,omitempty"`
+	// Toolchain 是该服务专属的工具链覆盖，优先于顶层 toolchain。
+	// 不同项目常需要不同 JDK（例如某个工程要求 21、另一个要求 8），
+	// 因此版本必须能按服务指定，不能只留一个全局值。
+	Toolchain map[string]string `yaml:"toolchain" json:"toolchain,omitempty"`
+
+	// Origin 记录这条定义来自 pier.yaml 还是覆盖文件，由加载时填充。
+	// 界面据此决定「删除」是能真删，还是只能隐藏。
+	Origin string `yaml:"-" json:"-"`
+
+	// rootDir 是配置文件所在目录，加载时填充，用于把 Dir 解析成绝对路径。
+	rootDir string `yaml:"-" json:"-"`
+}
+
+// Config 是整份服务清单。
+type Config struct {
+	// Path 是配置文件的绝对路径。
+	Path string `yaml:"-"`
+	// Toolchain 按工具类别指定绝对路径或 sdkman 候选版本名，如 java: "17.0.12-oracle"。
+	Toolchain map[string]string `yaml:"toolchain"`
+	// Services 是服务定义列表，顺序即面板与 status 的展示顺序。
+	// 这是 pier.yaml 与覆盖文件合并之后的结果。
+	Services []*Service `yaml:"services"`
+	// Hidden 是被覆盖文件隐藏掉的名字。源文件里的定义还在，只是不参与展示与启停。
+	Hidden []string `yaml:"-"`
+	// DeclaredGroups 是覆盖文件里显式声明过的分组名，按声明顺序排列。
+	// 它让空分组也能存在；谁属于哪个分组仍然只看服务自己的 group 字段。
+	DeclaredGroups []string `yaml:"-"`
+	// OverlayPath 是本次加载用到的覆盖文件路径，供界面展示。
+	OverlayPath string `yaml:"-"`
+	// baseNames 是 pier.yaml 原始定义里的服务名。
+	// 「删除」要靠它区分两种语义：源文件里有这个名字就只能隐藏，
+	// 否则把覆盖里那条一删，源文件里的定义就又冒出来了——界面说着「已删除」，
+	// 列表里却还在，这比不能删更让人费解。
+	baseNames map[string]bool `yaml:"-"`
+
+	// store 表示来自 Pier 的数据文件（见 store.go），可以修改并写回。
+	store bool
+	// root 是相对目录的基准。YAML 清单用清单所在目录；数据文件只存绝对路径，这里是主目录兜底。
+	root string
+	// 数据文件的日志、编译产物、进程状态放在系统目录，由 LoadStore 填好；
+	// YAML 清单留空，沿用清单旁边的运行目录。
+	logDir, binDir, statePath string
+}
+
+// Load 读取配置文件。path 为空时从当前目录向上查找 DefaultConfigName，
+// 这样在项目的任意子目录里都能直接执行 Pier。
+func Load(path string) (*Config, error) {
+	if path == "" {
+		found, err := findUpward()
+		if err != nil {
+			return nil, err
+		}
+		path = found
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("解析配置路径失败：%w", err)
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置失败：%w", err)
+	}
+
+	var c Config
+	// KnownFields 让拼错的键名直接报错，而不是被静默忽略。
+	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败：%w", abs, err)
+	}
+
+	c.Path = abs
+	c.baseNames = make(map[string]bool, len(c.Services))
+	for _, s := range c.Services {
+		if s == nil {
+			continue
+		}
+		s.rootDir = filepath.Dir(abs)
+		c.baseNames[s.Name] = true
+	}
+	if err := c.validate(); err != nil {
+		return nil, err
+	}
+
+	// 基础清单先自检通过，再叠加覆盖文件——顺序反过来的话，一个坏掉的覆盖文件
+	// 会让人以为手写的清单出了问题，排查方向整个是错的。
+	overlayPath := overlayPathFor(abs)
+	ov, err := LoadOverlay(overlayPath)
+	if err != nil {
+		return nil, err
+	}
+	base := c.Services
+	c.merge(base, ov)
+	c.OverlayPath = overlayPath
+	if err := c.validate(); err != nil {
+		return nil, fmt.Errorf("%s 与 %s 合并后不合法：%w", abs, overlayPath, err)
+	}
+	return &c, nil
+}
+
+// Dir 返回相对目录的基准。YAML 清单是清单所在目录；数据文件是它记着的工作空间根。
+func (c *Config) Dir() string {
+	if c.root != "" {
+		return c.root
+	}
+	return filepath.Dir(c.Path)
+}
+
+// findUpward 从当前目录逐级向上查找配置文件。
+func findUpward() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		cand := filepath.Join(dir, DefaultConfigName)
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+			return cand, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("未找到 %s：请在配置文件所在目录或其子目录下运行，或用 --config 指定", DefaultConfigName)
+		}
+		dir = parent
+	}
+}
+
+func (c *Config) validate() error {
+	if len(c.Services) == 0 {
+		return fmt.Errorf("%s 中没有任何服务定义", c.Path)
+	}
+	return c.validateServices()
+}
+
+// validateServices 逐条检查服务定义。和 validate 分开，是因为数据文件允许一个服务都没有。
+func (c *Config) validateServices() error {
+	seen := make(map[string]bool, len(c.Services))
+	for i, s := range c.Services {
+		if s == nil {
+			return fmt.Errorf("第 %d 个服务定义为空", i+1)
+		}
+		if strings.TrimSpace(s.Name) == "" {
+			return fmt.Errorf("第 %d 个服务缺少 name", i+1)
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("服务名重复：%s", s.Name)
+		}
+		seen[s.Name] = true
+
+		if strings.TrimSpace(s.Dir) == "" {
+			return fmt.Errorf("服务 %s 缺少 dir", s.Name)
+		}
+		if strings.HasPrefix(s.Dir, "~") {
+			return fmt.Errorf("服务 %s 的 dir 不支持 ~，请写相对配置文件目录的路径或绝对路径", s.Name)
+		}
+		if s.Kind != "" && !validKind(s.Kind) {
+			return fmt.Errorf("服务 %s 的 kind 无效：%s（可用：%s）", s.Name, s.Kind,
+				strings.Join([]string{KindGo, KindJava, KindNode, KindPython, KindShell}, "、"))
+		}
+		if s.Kind == KindJava && s.Module == "" && s.Run == "" {
+			return fmt.Errorf("服务 %s 是 Java 服务，必须给出 module（Maven 子模块名）或直接写 run", s.Name)
+		}
+	}
+	return nil
+}
+
+func validKind(k string) bool {
+	switch k {
+	case KindGo, KindJava, KindNode, KindPython, KindShell:
+		return true
+	}
+	return false
+}
+
+// Find 按名字取服务。
+func (c *Config) Find(name string) (*Service, error) {
+	for _, s := range c.Services {
+		if s.Name == name {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("没有名为 %s 的服务（可用：%s）", name, strings.Join(c.Names(), "、"))
+}
+
+// Names 返回所有服务名，顺序与配置一致。
+func (c *Config) Names() []string {
+	out := make([]string, 0, len(c.Services))
+	for _, s := range c.Services {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+// AbsDir 返回服务的绝对工作目录。
+func (s *Service) AbsDir() string {
+	if filepath.IsAbs(s.Dir) {
+		return filepath.Clean(s.Dir)
+	}
+	return filepath.Clean(filepath.Join(s.rootDir, s.Dir))
+}
+
+// GroupName 返回用于展示的分组名，没写 group 的归入「未分组」。
+func (s *Service) GroupName() string {
+	if g := strings.TrimSpace(s.Group); g != "" {
+		return g
+	}
+	return UngroupedName
+}
+
+// IsOverlay 表示这条定义来自可写的覆盖文件，界面能真正删除它。
+func (s *Service) IsOverlay() bool { return s.Origin == OriginOverlay }
+
+// Groups 按服务出现顺序返回分组名，重复的只留一次。
+// 顺序即清单顺序，这样侧栏的排列和开发者写清单时的思路一致，而不是按字典序打乱。
+func (c *Config) Groups() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range c.Services {
+		g := s.GroupName()
+		if seen[g] {
+			continue
+		}
+		seen[g] = true
+		out = append(out, g)
+	}
+	return out
+}
+
+// InBase 表示某个服务名在只读的 pier.yaml 里有定义。
+// 界面据此决定「删除」是能真删（只存在于覆盖里），还是只能隐藏。
+func (c *Config) InBase(name string) bool { return c.baseNames[name] }
+
+// AllGroups 返回面板上应该出现的全部小组，按展示顺序：
+// 先排覆盖文件里显式声明过的（建过的分组，空着也留着），
+// 再接上只在服务里有、没声明过的分组，按它们在清单里第一次出现的顺序。
+// 顺序稳定且可预期，比按字典序排要贴近开发者写清单时的思路。
+func (c *Config) AllGroups() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(g string) {
+		if g == "" || seen[g] {
+			return
+		}
+		seen[g] = true
+		out = append(out, g)
+	}
+	for _, g := range c.DeclaredGroups {
+		add(strings.TrimSpace(g))
+	}
+	for _, s := range c.Services {
+		add(s.GroupName())
+	}
+	return out
+}
+
+// CountInGroup 返回某个分组下的服务数。
+func (c *Config) CountInGroup(group string) int {
+	n := 0
+	for _, s := range c.Services {
+		if s.GroupName() == group {
+			n++
+		}
+	}
+	return n
+}
+
+// RelTo 把绝对路径写成相对清单目录的形式，写进覆盖文件时才不会把
+// 本机的绝对路径固化下来；不在清单目录之下时原样返回绝对路径。
+func (c *Config) RelTo(abs string) string {
+	if c.store {
+		return abs // 数据文件只存绝对路径
+	}
+	root := c.Dir()
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return abs
+	}
+	return rel
+}
+
+// UsedPorts 返回清单里已经写掉的全部端口，按升序排列。
+// 新增服务时靠它避开那些「此刻没在监听、但一启动就会撞车」的端口。
+func (c *Config) UsedPorts() []int {
+	var out []int
+	for _, s := range c.Services {
+		if s.Port > 0 {
+			out = append(out, s.Port)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
