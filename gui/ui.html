@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pier</title>
+<!--
+  这里只有一层壳：真正的界面在 app.js 里，第三方库在 assets/ 里。
+  两者都由 assets.go 在启动时内联进下面两个标记的位置——webview 是用
+  SetHtml 直接喂字符串的，背后没有文件服务器，页面里的相对路径没东西可解析。
+
+  样式和脚本是两个分开的标记，不能合成一个：脚本必须排在挂载点容器之后才执行，
+  否则 React 挂载时找不到容器，界面就是一片空白。
+  （这里刻意不写出那个容器的标签原文——截图脚本要按它定位插入点，
+  注释里出现同一段字面量会把插入点指到注释内部，注入的东西全被注释掉。）
+-->
+<!-- @@STYLES@@ -->
+</head>
+<body>
+<div id="root"></div>
+<!-- @@SCRIPTS@@ -->
+</body>
+</html>

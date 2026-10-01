@@ -1,0 +1,19 @@
+# gui 测试用的清单。端口取高位、平时没人用的号段，免得和本机正在跑的服务撞上。
+services:
+  - name: fixture-api
+    dir: .
+    kind: go
+    group: 后端
+    port: 47811
+    health: http://localhost:47811/health
+    note: 测试用的 Go 服务
+  - name: fixture-admin
+    dir: .
+    kind: go
+    group: 后端
+    port: 47812
+  - name: fixture-web
+    dir: .
+    kind: node
+    group: 前端
+    port: 47813

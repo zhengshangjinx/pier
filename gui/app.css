@@ -1,0 +1,794 @@
+/* 界面自身的样式。
+ *
+ * 骨架按 bigmodel.cn 控制台那套观感排：整页灰底、左侧一条透明的侧栏、
+ * 右侧一块浮起来的白色圆角面板，页头下面收一条发丝线。
+ *
+ * 这里只写 antd 管不到的东西：整页高度与滚动、侧栏的三段式骨架、
+ * 主面板的浮动与圆角，以及几处必须撑满高度的容器。
+ * 本文档里不出现任何色值——带色的地方（面板底色、页头分隔线、日志区）
+ * 都由 app.js 用 antd 的 token 给出来，组件内部的颜色交给 antd 自己算。
+ * app_test.go 会扫这个文件，多出一个色值就会失败。
+ */
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  /* 面板里到处都是路径、端口、命令行，等宽数字能让它们对齐、也更好读。 */
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+}
+
+/* ── 整体骨架 ───────────────────────────────────────────────────────────── */
+
+.dc-shell { height: 100vh; }
+
+/* 侧栏内缩一圈，让导航项两侧留白。
+   左边那 8px 是整页的留白：参考页里侧栏内容距窗口边 8px、面板紧贴其后，
+   于是导航区落在 20~216，与右边那块面板之间正好隔 12px。
+   品牌和页脚都不再各自加左边距，一律靠这条边对齐。 */
+.dc-side {
+  margin-left: 8px;
+  padding: 8px 12px 12px;
+  box-sizing: border-box;
+}
+
+/* 侧栏分三段：品牌、可滚动的导航、固定的页脚。
+   窗口再矮也不会把「新建分组」和主题切换挤没。
+   注意 antd 的 Sider 会把自己的子节点再包一层 .ant-layout-sider-children，
+   撑满高度的是那一层，所以 flex 容器得同时落在它身上——
+   只给 .dc-side 加 flex 的话，下面 .dc-nav 的 flex:1 找不到可分配的空间，
+   页脚会紧跟在菜单后面飘在中间。 */
+.dc-side,
+.dc-side .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 真实窗口里页面铺到了标题栏底下（见 gui/window_darwin.go），最顶上 28px 是
+   原生拖拽条和红黄绿三个按钮的地盘，这一条里不能放任何可点的东西：
+   侧栏整体下移，主面板从拖拽条下沿开始。演示页没有窗口，不加这个类。 */
+.dc-native .dc-side { padding-top: 30px; }
+.dc-native .dc-main { margin-top: 28px; }
+
+.dc-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 4px 20px;
+  flex: none;
+}
+
+.dc-brand-text { line-height: 1.25; }
+.dc-brand-name { font-weight: 650; letter-spacing: -.01em; }
+
+.dc-nav { flex: 1; overflow-y: auto; }
+
+/* 每节的小标题（服务 / 设置）：和上一节拉开一段距离，读起来才是两节而不是一串。 */
+.dc-nav .ant-menu-item-group-title { padding: 18px 8px 6px; }
+
+/* 分组前那颗状态点要占满图标位的宽度，和「全部服务」的图标对齐。 */
+.dc-nav-dot { display: inline-flex; width: 14px; justify-content: center; }
+.dc-nav .ant-menu-item .dc-nav-dot + span { margin-inline-start: 10px; }
+
+/* antd 的 Menu 默认铺一层 colorBgContainer 的白底。侧栏这一版要的是透明：
+   白底会在灰底和右侧白面板之间横插一块白，看着像侧栏里又嵌了张卡片，
+   「整页只有一块白」的层次就断了。 */
+.dc-nav .ant-menu { background: transparent; }
+
+/* 菜单项里的「名字 + 数量」两端对齐。名字过长时省略，
+   不能让数字被挤出去。 */
+.dc-nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dc-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-nav-count { opacity: .45; font-variant-numeric: tabular-nums; }
+
+/* 「…」挨在数量左边，平时不占位，悬停这一行（或菜单开着）才出现。
+   名字吃掉剩余宽度，按钮出现时由它让出位置（过长就省略），数量始终不动。 */
+.dc-nav-row .dc-nav-name { flex: 1; min-width: 0; }
+.dc-nav-count { flex: none; min-width: 12px; text-align: right; }
+
+.dc-nav-more { display: none; flex: none; margin-right: -2px; }
+
+.dc-nav-more .ant-btn {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  border-radius: 6px;
+  color: var(--dc-text2);
+}
+
+.ant-menu-item:hover .dc-nav-more,
+.dc-nav-row.is-open .dc-nav-more,
+/* 键盘用户没有 hover：焦点落进这一行时也要把它露出来，否则 Tab 到「分组操作」
+   上，按钮是看不见的（点不到看不见的东西）。 */
+.dc-nav-row:focus-within .dc-nav-more { display: inline-flex; }
+
+/* 拖动分组时的落点，和服务行同一套做法（inset 阴影，不占位置、不推行）。 */
+.dc-nav-row.dc-nav-drop-before { box-shadow: inset 0 2px 0 var(--dc-primary); }
+.dc-nav-row.dc-nav-drop-after { box-shadow: inset 0 -2px 0 var(--dc-primary); }
+
+/* 页脚只剩主题那一行：它不跟着数据走，是纯界面偏好，收尾的地方留给它正合适。 */
+.dc-side-foot { flex: none; padding-top: 12px; }
+
+/* 「⋯」里那行「现在看的是哪份数据」（本机数据 / 命令行指定的那份 YAML）。
+   名字、来源标签、目录挤在一行里，目录是唯一可以让位的东西：放不下就省略，
+   完整路径在 title 上。撑破下拉菜单比少显示几个字难看，省略的是目录不是名字。 */
+.dc-src {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 320px;
+}
+
+.dc-src-name { flex: none; }
+
+.dc-src-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dc-text3);
+}
+
+/* 来源标签（「命令行指定」这类）跟名字走，不参与让位；它和 .dc-count、.dc-kind
+   共用上面那一档胶囊样式（高度、圆角、内边距都在那儿），这里只补颜色。 */
+.dc-src-tag { flex: none; color: var(--dc-text3); }
+
+.dc-side-foot .ant-segmented-item-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+/* ── 主区 ───────────────────────────────────────────────────────────────── */
+
+/* 一块浮在灰底上的白色圆角面板：左侧不留间距（紧贴侧栏），
+   其余三边各留 8px，让底下的灰透出来。底色由 app.js 用 token 给。 */
+.dc-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  margin: 8px 8px 8px 0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* 页头是两行：上面一行「标题 + 动作」，下面一行是搜索与快捷筛选。
+   筛选那一行不跟标题挤在同一排里：窗口窄下来时右边那排按钮（⋯ / 启停 / 添加应用）
+   本来就占满了，再塞进一个输入框和三个选项，先被顶出窗口的会是「添加应用」。
+   也不放进下面会滚动的 .dc-body：筛完往下翻，得还能看见自己筛了什么。 */
+.dc-head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 16px 28px 14px;
+}
+
+.dc-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dc-filter { display: flex; align-items: center; gap: 10px; }
+
+/* 搜索框吃掉一点宽度就够了：它按名字/目录/端口过滤，词都很短。
+   给个下限，免得窗口一窄它先被压没。 */
+.dc-filter .dc-search { flex: 0 1 300px; min-width: 140px; }
+.dc-filter .ant-segmented { flex: none; }
+
+.dc-head-title { font-weight: 650; letter-spacing: -.01em; line-height: 1.3; }
+
+.dc-head-acts { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* 副标题可能很长，允许它收缩并省略，而不是把右侧按钮顶出窗口。 */
+.dc-head-sub {
+  display: block;
+  margin-top: 2px;
+  max-width: 62ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* flex 子项默认 min-height:auto，不归零的话内容一长就顶破容器，
+   滚动条会跑到整页上去而不是落在这块区域里。 */
+.dc-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px 28px 32px;
+}
+
+/* ── 概览 ───────────────────────────────────────────────────────────────── */
+
+/* 一排四格。格子之间用 1px 的缝透出底下的发丝线色，而不是四张各自描边的卡片：
+   四张卡片并排时每两张之间有两条边，看着像拼起来的；一整块再切开，才是一个东西。 */
+.dc-overview { margin-bottom: 28px; }
+
+.dc-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--dc-line);
+  border: 1px solid var(--dc-line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.dc-stat {
+  background: var(--dc-surface);
+  padding: 14px 18px 16px;
+  min-width: 0;
+}
+
+.dc-stat-wide { grid-column: span 2; display: flex; align-items: center; }
+.dc-stat-wide > .ant-alert { flex: 1; }
+
+.dc-stat-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: .75;
+  margin-bottom: 6px;
+}
+
+.dc-stat-value {
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -.02em;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.dc-stat-unit { font-weight: 400; letter-spacing: 0; }
+
+.dc-stat-sub {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态分布条：只有 4px 高，是给眼睛一个比例感，不是用来读数的。 */
+.dc-bar {
+  display: flex;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 10px;
+}
+.dc-bar > span { display: block; height: 100%; }
+
+.dc-footnote { margin-top: 8px; line-height: 1.6; }
+
+/* 服务占用对比：概览卡里横跨一整行的一条，用 1px 的缝和上面四格分开。
+   内存和 CPU 各一列，各自按本列的最大值为满格，都是排行榜——长度只表示
+   同一列里谁比谁大多少；两列之间不能互相量。 */
+.dc-chart { grid-column: 1 / -1; }
+
+/* 三列：名字、内存、CPU。列宽只在这一处定义，每一行是它的一份 subgrid——
+   写两份列宽迟早会错开一格，而竖线错开一格比没有竖线更难看。
+   每一列内部再分「条 + 数」两格，数紧贴在自己那根条右边 8px——读到哪个数
+   属于哪一列，靠的是距离；两列之间空 29px，比列内那道缝宽得多，眼睛扫过去
+   不会串行。名字定宽、两列等宽吃满剩下的：条越长，同一列里的差距越好读。
+
+   数字右对齐、等宽数字（.dc-mono，见下面），且与条同处一条基线上——这是
+   一列数扫下来能比大小的前提。
+
+   行距由每格上下 4px 的内边距给，不用 gap：留了缝，列与列之间那两条竖线
+   就会断成一段一段的虚线，而上面那排格子之间的线是通到底的，两块并排摆着
+   一眼能看出不是一回事。22 + 4 + 4 和原来的 22 + 8 一样高，版面不变。 */
+.dc-chart-rows {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 0;
+  row-gap: 0;
+}
+.dc-chart-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+
+/* 表头那一行同样是一份 subgrid，所以「内存」「CPU」正好压在各列头上；
+   它没有名字，第一格让给标题。表头给出每列的最大值——条是按本列最大值
+   归一化的，不给参照的话「满格」只是个相对说法，说不了这一列到底有多大。
+   下面留 6 + 4（第一行的上内边距）= 原来的 8 + 2，间距照旧。 */
+.dc-chart-row.dc-chart-head > .dc-chart-cell { padding-bottom: 6px; }
+.dc-chart-label { padding: 0 14px 6px 0; }
+
+.dc-chart-cell {
+  display: grid;
+  /* 数值那一格定宽 72：「最大 1.2 GB」是这里最宽的一句，要放得下而又不
+     把条挤短。条吃满剩下的一格，条越长，同一列里的差距越好读。 */
+  grid-template-columns: minmax(0, 1fr) 72px;
+  align-items: center;
+  column-gap: 8px;
+  /* 竖线两侧各留 14px，一样宽：一边 14 一边 8 的话，线看着像贴着其中一列长的，
+     那就成了「这一列的下划线」而不是「两列之间的分隔」。 */
+  padding: 4px 14px;
+  /* 竖线画在这里，不在容器上：行挨着行，每格这 1px 的左边就接成一条通到底的线。
+     颜色和上面那排格子之间、以及卡片外框是同一种（--dc-line），全套配色里最弱的
+     一条，不会跟条子抢。两道线各说一件事：右边那道说「到这里换了一个口径」——
+     两列各自按本列最大值归一化，本来就不能互相量；左边那道把名字和下面那两列
+     分开，否则名字只是一段悬空的字，数据从哪儿开始要靠猜。 */
+  border-left: 1px solid var(--dc-line);
+}
+
+.dc-chart-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 4px 14px 4px 0; }
+
+/* 条只圆数据那一端，基线这一端保持方角——上下几行的条从同一条竖线长出来，
+   起点才连得成一条线。轨道本身不带圆角，跟着条走。 */
+.dc-chart-track { height: 6px; overflow: hidden; }
+.dc-chart-fill {
+  display: block;
+  height: 100%;
+  border-radius: 0 3px 3px 0;
+  /* 极短的条也要看得见：不到 1px 就退成一条看不见的发丝。 */
+  min-width: 2px;
+}
+
+/* 数值右对齐、用等宽数字，一列扫下来位次对得齐。表头里的「最大 X」也落在
+   这一列上，跟下面的数对齐；写不下时溢出到右边那道 28px 的缝里，不挡条。 */
+.dc-chart-val {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窗口窄时四格折成两行，数字不能被挤到省略。 */
+@media (max-width: 860px) {
+  .dc-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── 状态点 ─────────────────────────────────────────────────────────────── */
+
+/* 颜色从 style 的 color 进来（取自 token），点本身和光晕都用 currentColor。 */
+.dc-dot {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.dc-dot[data-live]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: currentColor;
+  animation: dc-pulse 2.4s ease-out infinite;
+}
+
+@keyframes dc-pulse {
+  0%   { transform: scale(1);   opacity: .55; }
+  70%  { transform: scale(2.6); opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+
+/* ── 分组与服务列表 ─────────────────────────────────────────────────────── */
+
+.dc-group-block { margin-bottom: 28px; }
+
+.dc-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+  min-height: 32px;
+}
+
+.dc-group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.dc-group-name { font-weight: 600; }
+
+.dc-count,
+.dc-kind,
+.dc-src-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.dc-kind { border-radius: 5px; padding: 0 6px; flex: none; }
+
+/* 服务实际会用的 SDK。挂在名字后面而不是单独一列：一行的宽度是有限的，
+   再加一列会把名字挤没。太长时省略，完整的那一串在 title 里。
+   它比名字弱一档，名字仍然是一行里第一个看得到的。 */
+.dc-runtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dc-runtime .anticon { flex: none; }
+
+.dc-group-live { display: inline-flex; align-items: center; gap: 6px; }
+
+.dc-group-acts { display: flex; align-items: center; gap: 2px; flex: none; }
+
+/* 一个分组就是一块整体：外圈描边一次，行与行之间只用一条发丝线分开。 */
+.dc-list {
+  border: 1px solid var(--dc-line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--dc-surface);
+}
+
+.dc-list-empty { padding: 28px 20px; text-align: center; }
+
+/* 筛选之后一个都没剩下时的那一句。不套 .dc-list 的框：一块带描边的空盒子
+   摆在列表原来的位置，看着像「这里本来有东西、现在没了」。 */
+.dc-filter-empty { padding: 36px 0; text-align: center; }
+
+/* 三列：名字与说明吃掉剩余宽度，端口与资源、动作区定宽，上下行才对得齐。 */
+.dc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px 180px;
+  align-items: center;
+  column-gap: 20px;
+  padding: 14px 14px 14px 20px;
+  min-height: 68px;
+  box-sizing: border-box;
+  transition: background-color .15s ease;
+}
+
+.dc-row + .dc-row { border-top: 1px solid var(--dc-line); }
+.dc-row:hover { background: var(--dc-hover); }
+
+/* 拖动排序：落点那条线画在行自己的上下边缘上（inset 阴影），不插占位元素——
+   插进去会把下面的行整体推一下，而鼠标正按着的那一行跟着动，落点就飘了。
+   正在拖的那一行压暗，一眼能看出「它在跟着鼠标走」。 */
+.dc-row.dc-row-drop-before { box-shadow: inset 0 2px 0 var(--dc-primary); }
+.dc-row.dc-row-drop-after { box-shadow: inset 0 -2px 0 var(--dc-primary); }
+.dc-row.is-dragging { opacity: .45; }
+
+.dc-row-main { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.dc-row-main > .dc-dot { margin-top: 7px; }
+
+.dc-row-text { min-width: 0; flex: 1; }
+
+.dc-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+.dc-row-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dc-row-sub {
+  display: flex;
+  align-items: center;
+  margin-top: 3px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* 说明段之间用一个小圆点隔开，最后一段（通常是备注）过长时省略。 */
+.dc-row-bit { flex: none; }
+.dc-row-bit:last-child { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dc-row-bit::before { content: "·"; margin: 0 6px; opacity: .6; }
+
+.dc-row-err { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+
+/* 进行中的动作（排队启动、编译中、等待就绪）：主色文字前一个小转圈。
+   主按钮这时是能点的「停止」，进度就挪到这一行来说。 */
+.dc-row-op { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; flex: none; }
+.dc-spin {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: dc-rotate .8s linear infinite;
+}
+@keyframes dc-rotate { to { transform: rotate(360deg); } }
+.dc-row-err-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; flex: none; }
+.dc-row-err-link:hover { opacity: .8; }
+/* 这一处原来是 <a>，没有 href：鼠标点得动，键盘永远够不着，读屏也报不出是个链接。
+   换成 antd 的 link 按钮之后，得把 antd 那套盒子拆掉再放回这一行里——
+   它自带 32px 的高度、左右各 15px 的内边距和 14px 的字号，随便留一个下来，
+   这行 12px 的说明就会被撑开，右边的失败原因也被顶走。 */
+.dc-row-err-link.ant-btn {
+  color: inherit; height: auto; padding: 0; font-size: inherit;
+  line-height: inherit; border-radius: 0;
+}
+
+/* 窄窗口下才露出来的那一行：端口与资源挪进名字下面。 */
+.dc-row-inline { display: none; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dc-row-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dc-row-meta > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dc-mono {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.dc-row-ids { display: flex; align-items: baseline; gap: 10px; }
+.dc-port { font-weight: 500; }
+
+/* 次要的文字按钮：常态是次级文字色，悬停才回到正文色，不跟主操作抢。 */
+.ant-btn.dc-quiet:not(:disabled) { color: var(--dc-text2); font-weight: 400; }
+
+.dc-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.dc-row-actions > .ant-btn:first-child { min-width: 88px; margin-right: 4px; }
+
+@media (max-width: 1100px) {
+  .dc-row { grid-template-columns: minmax(0, 1fr) 212px 168px; column-gap: 14px; }
+}
+
+@media (max-width: 900px) {
+  .dc-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .dc-row-meta { display: none; }
+  .dc-row-inline { display: block; }
+}
+
+.dc-empty { padding: 40px 0; }
+
+.dc-hidden-bar { margin-bottom: 16px; }
+
+
+/* ── 表单 ───────────────────────────────────────────────────────────────── */
+
+/* 每栏底下的说明压小一号、贴近输入框：它是补充说明，不该和标签、输入框抢同样的分量，
+   更不该把栏与栏之间撑得比栏本身还高。 */
+.dc-form .ant-form-item-extra {
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 4px;
+  min-height: 0;
+}
+
+/* 表单按层级分成卡片：基本信息 / 专属设置 / 高级设置。每张卡一行小标题 + 灰色说明，
+   和概览、服务列表是同一套「整块描边」的做法。 */
+.dc-card {
+  border: 1px solid var(--dc-line);
+  border-radius: 12px;
+  padding: 14px 16px 0;
+  margin-bottom: 12px;
+}
+.dc-card:last-child { margin-bottom: 0; }
+.dc-card[hidden], .dc-card [hidden] { display: none; }
+
+.dc-card-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
+.dc-card-title { font-weight: 600; flex: none; }
+.dc-card-sub {
+  font-size: 12px;
+  color: var(--dc-text3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dc-card-alert { margin-bottom: 16px; }
+
+/* 「将使用 X，依据 Y」：表单里那几套 SDK 选完之后，把这次真正会用上的那一套
+   写在下面，连同「凭什么挑中它」。
+   用一块浅底而不是又一张描边卡：它是对上面那几个下拉的注解，不是第四个栏目。
+   一段里可能有两行——第一行是版本与依据，第二行是它装在哪。 */
+.dc-tc {
+  margin: 2px 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--dc-fill);
+}
+.dc-tc-head { font-weight: 600; margin-bottom: 4px; }
+.dc-tc-row + .dc-tc-row { margin-top: 2px; }
+.dc-tc-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.dc-tc-name { font-weight: 500; flex: none; }
+.dc-tc-why,
+.dc-tc-path {
+  color: var(--dc-text3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dc-tc-path { padding-left: 2px; }
+.dc-tc-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--dc-warning);
+}
+
+/* ── SDK 管理 ───────────────────────────────────────────────────────────── */
+
+/* 页首那一行说明加「重新扫描」：扫描结果会缓存，用户刚装完一个 SDK 时
+   需要有个地方让它重来一遍。 */
+.dc-sdk-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: var(--dc-text3);
+}
+
+/* SDK 那一行只有两列：左边是版本与路径，右边是动作。
+   服务列表的三列（端口、资源）在这里没有对应的东西，照抄会留两大块空白。 */
+.dc-sdk-row { grid-template-columns: minmax(0, 1fr) auto; }
+.dc-sdk-path { display: inline-block; max-width: 100%; }
+.dc-sdk-now {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 日志页 ─────────────────────────────────────────────────────────────── */
+
+/* 一行里三格：名字与日期区间、占用大小、动作。
+   占用单独占一列并右对齐、用等宽数字，是为了让它成一列——这一页要看的就是
+   「谁占得多」，一列数字扫下来就能排出来。日期区间跟着名字走，不占列：
+   它说的是「这一摊有多旧」，是读某一行时才关心的。 */
+.dc-log-row { grid-template-columns: minmax(0, 1fr) 104px auto; }
+.dc-log-size {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* 动作区里第一个按钮是纯图标的「在访达中显示」，不要 .dc-row-actions
+   给主按钮留的那 88px 起步宽度——那是给「启动 / 停止」那类文字按钮定的。 */
+.dc-log-row .dc-row-actions > .ant-btn:first-child { min-width: 0; margin-right: 0; }
+
+@media (max-width: 900px) {
+  .dc-log-row { grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 12px; }
+}
+
+/* 标签列：统一四个字以内、左对齐成一列，长了就省略而不是换行把输入框顶下去。 */
+.dc-form .ant-form-item-label > label {
+  color: var(--dc-text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 日志抽屉：等宽、可选中，长时间盯着看不累。
+   深浅两色各自给一套，因为日志区始终是深底白字，不跟着主题走。 */
+.dc-log {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #14161a;
+  color: #d7dae0;
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+/* 日志抽屉的正文：顶上一条工具条，下面整块日志。
+   抽屉正文默认是块流，而 .dc-log 写着 height: 100%——加了工具条之后，
+   那个百分比撑的是「整块正文的高度」而不是「剩下的高度」，日志会被顶出去一截，
+   于是整块跟着滚、工具条也给滚走了。改成纵向排列，日志把工具条之外的地方占满。 */
+.dc-log-drawer .ant-drawer-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dc-log-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.dc-log-count {
+  color: var(--dc-text3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 把后面那几件（换行、复制）推到右边：「找」和「拿走」是两组动作。 */
+.dc-log-gap { flex: 1; }
+
+/* 「自动换行」关掉之后一行就是一行，横向滚。word-break 要跟着改回来：
+   只改 white-space 的话 break-all 仍然会把长串从中间掰断，只是碰巧看不出来。 */
+.dc-log-nowrap { white-space: pre; word-break: normal; }
+
+/* 日志还在读的时候占住那块地方。不占的话，「正在读」会先显示成
+   「还没有日志」再跳成正文——一句话说了两件事，第二件还是错的。 */
+.dc-log-wait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 160px;
+}
+
+/* 演示模式的水印。演示数据和真实状态长得一样，必须有个显眼的标记，
+   否则截出去的图会被当成真的。外观交给 antd 的 Tag（color="warning"），
+   这里只管它钉在窗口右下角。 */
+.dc-demo-mark {
+  position: fixed; right: 16px; bottom: 16px; z-index: 900;
+  pointer-events: none;
+}
+
+/* ── 滚动条 ─────────────────────────────────────────────────────────────── */
+
+/* 系统默认可视化滚动条在 macOS 上是 15px 宽、带立体描边和高光的老式样子，
+   放在这套扁平留白里非常扎眼——尤其侧栏、主区和日志区同时出现三条的时候。
+   描边这里一律改成圆角细条、不画轨道。
+
+   两个色值走自定义属性，由 app.js 在切主题时从 PALETTE 写到根元素上；
+   本文档不出现色值这条纪律因此仍然成立。 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+
+/* 轨道透明：面板本身的底色就是最好的轨道，再铺一层灰等于多切一道边。
+   注意这里不能只写 ::-webkit-scrollbar-thumb——只要动了 ::-webkit-scrollbar，
+   WebKit 就整体切到自定义滚动条模式，系统那套「滚动时才淡入」的浮层样式不再生效，
+   滚动条会常驻。这是为了可控必须付的代价。 */
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* 滑块做成浮在内容边上的一条细圆条，而不是一根贴着边的 8px 灰棒子。
+
+   做法是留 2px 透明边框、再把背景裁进内容盒：真实着色只有 4px 宽，
+   另外 4px 是空气。不去改上面的 width，是因为那个值同时决定滚动条占多宽，
+   调它会连带挪动所有滚动容器的内容宽度；这里要的是「看起来细」，不是「占得少」。
+
+   透明边框还有个必须注意的副作用：只给 ::-webkit-scrollbar-thumb 上 border
+   而不给 track 画东西的话，滑块未覆盖的那段轨道就完全透出底下的面板，
+   这正是想要的；但 hover 时若用 border-color 去改色，滑块反而会变宽，
+   所以 hover 只换 background。 */
+::-webkit-scrollbar-thumb {
+  background: var(--dc-scroll-thumb);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover { background: var(--dc-scroll-thumb-hover); }
+
+/* ── 弹窗与抽屉 ─────────────────────────────────────────────────────────── */
+
+/* 弹窗的顶距跟着窗口高度走。antd 默认写死 top:100px，窗口一矮，弹窗的可用高度
+   就少掉 100px，底部按钮最先被顶出窗口。上限维持 100px，视觉重心不变。
+
+   这个表达式与 app.js 里算 BODY_SCROLL 的那份必须字字一致：
+   那边用它反推弹窗体还能有多高，对不上的话算出来的上限就比实际可用空间大，
+   矮窗口下按钮照样会被顶出去。 */
+.ant-modal { top: clamp(16px, 8vh, 100px); }
+
+/* 标题和正文之间 antd 只给 8px，警示框紧贴着标题，看着像挤进去的。 */
+.ant-modal .ant-modal-header { margin-bottom: 16px; }
