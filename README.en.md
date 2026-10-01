@@ -11,6 +11,23 @@ bring them up, read their logs and stop them. A Go CLI called `pier`, plus a mac
 
 ![Pier main window](docs/images/overview.png)
 
+## Name and mark
+
+**Pier** — the platform jutting out over the water: boats pull up, unload, and leave again. The
+services that dock here are your local projects, and you can see at a glance which ones are still
+running. But a pier is not part of the boats, and your services are not part of Pier — they run in
+their own sessions, so closing Pier or the terminal leaves them running and still writing logs.
+
+The icon is that pier: a deck, two piles under it, a waterline, and the rightmost pile rising past
+the deck as a lamp post with a **green light** on top — the same green as the "service is running"
+dot in the app. The background is a vertical gradient of the primary colour (`#3F6BFF` → `#1433D6`).
+Deliberately not the letter P: a white P on blue reads as a parking sign.
+
+The icon is **drawn in code** ([`tools/mkicon`](tools/mkicon)) rather than shipped as a bitmap, so
+it can follow the palette; a bitmap would need a design tool, and a binary blob in the source hides
+what changed. The sidebar mark (`Mark` in `gui/app.js`) is the same geometry in the same 200×200
+viewBox — change one and you change both.
+
 ## Why
 
 A growing share of code is written by AI, and every change wants a restart to be seen. Opening an
