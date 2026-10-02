@@ -6,7 +6,7 @@
 
 Pier 把「哪些目录、算什么类型、怎么起、占哪个端口」记成一份清单，之后不管是你还是 AI，
 都能一条命令（或者界面上点一下）把整套服务起起来、看日志、停掉。
-一个 Go 写的命令行 `pier`，外加一个 macOS 图形界面 `Pier.app`，零运行时依赖。
+一个 Go 写的命令行 `pier`，外加一个图形界面（macOS / Windows / Linux 各一份），零运行时依赖。
 
 ![Pier 主界面](docs/images/overview.png)
 
@@ -106,11 +106,11 @@ Pier 把它们拿出来，变成一份清单加一个常驻的轻量入口：
 | --- | --- |
 | 语言 | Go 1.24，编译出单一二进制，零运行时依赖 |
 | 命令行 | 自绘表格；交互式面板用 [bubbletea](https://github.com/charmbracelet/bubbletea) + [lipgloss](https://github.com/charmbracelet/lipgloss) |
-| 图形界面 | macOS WKWebView（[webview_go](https://github.com/webview/webview_go)）+ React 18 + [antd](https://ant.design/) 5 + [htm](https://github.com/developit/htm) |
+| 图形界面 | 系统自带的 WebView（[webview_go](https://github.com/webview/webview_go)：macOS 用 WKWebView、Windows 用 WebView2、Linux 用 WebKitGTK）+ React 18 + [antd](https://ant.design/) 5 + [htm](https://github.com/developit/htm) |
 | 前端构建 | **没有构建**：第三方库是 UMD 构建，连同样式与应用代码一起内联进一份 HTML。不需要 npm，不需要打包器，也不引 CDN（断网、代理、CDN 被墙都会让窗口打开后一片空白，而用户无从判断原因） |
 | 配置 | YAML（[yaml.v3](https://github.com/go-yaml/yaml)）；界面编辑的那份存在数据目录里 |
 | 数据 | 全部是 `~/.pier/` 下的 JSON 与日志文件，没有数据库，没有后台守护进程 |
-| 平台 | 命令行在 macOS / Linux 上都能编译运行；图形界面只支持 macOS 11+ |
+| 平台 | macOS 11+ / Windows 10+ / Linux（图形界面要 GTK3 与 WebKit2GTK 4.0）；`./package.sh` 一次打出三边的安装包 |
 
 ## 安装
 
@@ -129,15 +129,21 @@ go build -o pier .
 go install github.com/zhengshangjinx/pier@latest
 ```
 
-### 图形界面（macOS 11+）
+### 图形界面
 
 ```bash
-./build-app.sh          # 打包出 build/Pier.app
-open build/Pier.app
+./package.sh            # 按平台各打一份，产物全部落在 dist/
 ```
 
-只要本机有 Go 和 Xcode 命令行工具即可（`sips`、`iconutil`、`codesign` 都是系统自带的）。
-生成的 App 用临时签名，自己用不需要开发者证书。
+| 平台 | 产物 | 说明 |
+| --- | --- | --- |
+| macOS | `Pier-<版本>-macos-universal.dmg` / `.zip` | Intel 与 Apple 芯片同一份；`.dmg` 里有一个「应用程序」替身，拖过去就是安装 |
+| Windows | `Pier-<版本>-windows-amd64.zip` | 解压即用（`pier.exe` 命令行 + `pier-gui.exe` 界面），界面要系统自带的 WebView2 运行时（Win11 自带，Win10 多半也随 Edge 装好了） |
+| Linux | `Pier-<版本>-linux-amd64.tar.gz` / `-arm64.tar.gz` | 解压后 `./install.sh` 装到 `~/.local`；界面要 GTK3 与 WebKit2GTK 4.0 |
+
+只想在本机打一份也行：macOS 上 `./build-app.sh` 打包出 `build/Pier.app`（只要本机有 Go 和
+Xcode 命令行工具即可，`sips`、`iconutil`、`codesign` 都是系统自带的；生成的 App 用临时签名，
+自己用不需要开发者证书）；Windows / Linux 上 `go build -o pier-gui ./gui`。
 
 ## 快速开始
 

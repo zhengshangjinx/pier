@@ -1,6 +1,6 @@
 # Pier
 
-本地多项目服务的启停工具：命令行 `pier` + macOS 图形界面 `Pier.app`。
+本地多项目服务的启停工具：命令行 `pier` + 图形界面（macOS / Windows / Linux 各一份）。
 Go 模块名 `github.com/zhengshangjinx/pier`。
 
 ## 常用命令
@@ -11,8 +11,71 @@ Go 模块名 `github.com/zhengshangjinx/pier`。
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 go vet ./... && go test ./... -count=1     # 校验
 ./build-app.sh                             # 清空 build/ 后打包 build/Pier.app
+./package.sh [版本号]                       # 按平台各打一份，产物全在 dist/
+
+# Linux 那两份在本机要带镜像（不带的话基础镜像与 apt 都从官方源走，会卡死；
+# 三个变量只是「往哪儿取」，不带版本号那一个照旧）。apt 那个必须两架构同步，
+# 只有南大满足（原文见下），别换回华为云：
+PIER_APT_MIRROR=mirror.nju.edu.cn PIER_GO_DL=https://mirror.nju.edu.cn/golang \
+  PIER_GOPROXY=https://goproxy.cn,direct ./package.sh 0.1.0
 tools/shoot/shoot.py /tmp/a.png 1382 880 [弹窗] [参数] [light|dark]   # 演示数据截图（尺寸用初始窗口那个）
 ```
+
+## 三个平台
+
+同一个 `gui` 包编三次，webview 分别走 WKWebView / WebView2 / WebKitGTK。
+打包在 `package.sh`：macOS 用本机的 Xcode 工具链（`build-app.sh`），
+Windows 用 Homebrew 的 mingw-w64（`CC` 和 `CXX` 都要给，cgo 编 `.cc` 用的是 `CXX`），
+Linux 走 `tools/pkg/linux` 的容器（Ubuntu 22.04，因为 webview 的 cgo 指令写死了
+`webkit2gtk-4.0`，24.04 起只剩 4.1）。
+
+那三处官方源在连不上的网络上能逐个换掉：`tools/pkg/linux/Dockerfile` 顶上四个 build-arg
+（`BASE_IMAGE` / `APT_MIRROR` / `GO_DL_URL` / `GOPROXY`），默认全是官方地址，
+`package.sh` 会把同名的 `PIER_*` 环境变量转过去。这台机器上必须给：Docker Hub 的拉取
+在这里一挂十几分钟也下不来（注意容器里的网络是通的，`docker pull` 走的是 daemon 自己
+那一条路，两者不是一回事），基础镜像只能一次性 `docker import` 一份 jammy 的 rootfs
+再打上 `ubuntu:22.04` 的标签；apt 与 Go 压缩包都走 `mirror.nju.edu.cn`（arm64 的 rootfs
+源里写的是 `ports.ubuntu.com`，这条也要一起换，路径是 `/ubuntu-ports`），模块走
+`goproxy.cn`。apt 那个镜像**必须是两个架构同步的**，南大是、华为云不是：`linux-libc-dev`
+是 `Multi-Arch: same`，两个架构版本不一致就互相 `Breaks`，而华为云的 ubuntu-ports 落后
+一档，`libgtk-3-dev:amd64` 整条依赖当场就装不上（报的是 `libc6-dev:amd64 : Depends:
+linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版本对不齐）。
+这几条都是实测出来的：同一条线路上 `mirrors.aliyun.com` 只有 200 KB/s 上下（一个 17 MB
+的索引要 90 秒），huaweicloud 与南大都是 3–8 MB/s；另外这条线路对**大传输**不客气——
+几十 KB 的索引没事，整包几百兆会中途把连接掐掉（apt 的 `Acquire::Retries` 只管单个文件，
+管不了这种整体断连），所以 Dockerfile 里下载写成「先只下、下不齐隔几秒再来一遍」，
+已取到的 `.deb` 留在缓存里，重来只补缺的。另外 apt 那一步必须排在 Go 之前——下载 Go 用的是 curl，而基础镜像里没有 curl。
+
+- Linux 那份在本机是**交叉编译**出来的：arm64 用系统 gcc 原生编，amd64 用
+  `gcc-x86-64-linux-gnu`，GTK / WebKit 各装一份 `:amd64` 的头文件与 .pc（落在
+  `/usr/lib/x86_64-linux-gnu`、`/usr/include/x86_64-linux-gnu`，与本机那套各占各的）。
+  只有 `libwebkit2gtk-4.0-dev` 装不了 amd64：同族的 `libgtk-3-dev`、
+  `libjavascriptcoregtk-4.0-dev`、`libsoup2.4-dev` 都标了 `Multi-Arch: same`，唯独它没标
+  还显式写了 `Conflicts`，apt 一见就判互斥（实为打包疏漏，文件其实分得开）。交叉编译缺的
+  就是它那一个 `.pc` 与一根 `.so` 软链，所以 `apt-get download` 取 `.deb`、`dpkg-deb -x`
+  直接解到 `/`，**不登记进 dpkg 数据库**——登记了的话，此后每次 apt 操作都要面对一个它认为
+  装不上的包。
+
+- **平台差异一律靠文件后缀（build tag）分家，共用文件里不写 `runtime.GOOS` 分支**：
+  分了家才看得见谁是谁，`runtime.GOOS` 一旦长进共用代码就再也摘不干净。
+  成对的有 `window_<平台>.go`、`picker_<平台>.go`、`internal/proc/sys_{unix,windows}.go`、
+  `internal/toolchain/roots_<平台>.go`、`internal/config/shell_{unix,windows}.go`、
+  `internal/sysopen/open_<平台>.go`。改 Windows 那一侧不该让 mac / Linux 编出来的东西
+  有任何变化（底线）。
+- 共用文件里不许出现平台专有的东西（`/usr/bin/osascript`、「访达」、`syscall.Kill`）。
+  页面上那两处平台差异是后端注入的：有没有原生拖拽条 `window.__PIER_NATIVE__`，
+  文件管理器叫什么 `window.__PIER_FILEMGR__`（`gui/app.go` 的 `nativeScript`）。
+- 可执行位在 Windows 上不能看 `os.Stat` 的模式位（那里普通文件一律 0666），
+  走 `internal/execpath`：按后缀认，且**不读 `PATHEXT`**——它常被改坏，而这里要认的是
+  清单里写死的那个文件。
+- 进程名那两把旋钮只在 unix 上拧：Windows 上 `namingByArgv0` 为假，那一段整个不跑。
+- `pier-gui.exe` 必须带 `-H=windowsgui`，否则双击先弹一个黑控制台，关掉它界面也没了。
+  Windows 的剪贴板写在 `gui/clipboard_windows.go` 的 C 里：`GlobalLock` 返回的是
+  地址，Go 里那句 uintptr → unsafe.Pointer 会被 `go vet` 的 unsafeptr 拦下（拦得对，
+  只是那块内存不归 GC 管），挪进 C 就不必写一行靠人判断的豁免。
+- Windows 上的「浏览…」等三个选择框走系统自带的 Windows PowerShell 5.1
+  （路径写死到 `%SystemRoot%`，不走 PATH：pwsh 7 没有 `-STA`），
+  Linux 上走 zenity / kdialog / qarma。
 
 ## 约定
 

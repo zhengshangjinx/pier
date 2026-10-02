@@ -6,8 +6,8 @@
 
 Pier keeps a manifest of your services — which directory, what kind of project, how to start it,
 which port it takes — and gives both you and your AI coding agent one lightweight entry point to
-bring them up, read their logs and stop them. A Go CLI called `pier`, plus a macOS app called
-`Pier.app`. No runtime dependencies.
+bring them up, read their logs and stop them. A Go CLI called `pier`, plus a GUI (one build each
+for macOS, Windows and Linux). No runtime dependencies.
 
 ![Pier main window](docs/images/overview.png)
 
@@ -84,7 +84,7 @@ process group.
 - Cleaning skips services that are currently running: the log fd belongs to that independent
   process, so deleting the file would only unlink it and free the space on exit.
 
-### GUI (macOS)
+### GUI
 
 - Two sidebar sections only: **Services** (all / per group) and **Settings** (SDKs, logs).
 - Reorder services by dragging, rename them (log directory moves along), duplicate one to edit.
@@ -116,11 +116,11 @@ The log drawer, SDK management and the dark theme (the rest are in
 | --- | --- |
 | Language | Go 1.24, compiled to a single binary with no runtime dependencies |
 | CLI | Hand-drawn tables; the interactive panel uses [bubbletea](https://github.com/charmbracelet/bubbletea) + [lipgloss](https://github.com/charmbracelet/lipgloss) |
-| GUI | macOS WKWebView ([webview_go](https://github.com/webview/webview_go)) + React 18 + [antd](https://ant.design/) 5 + [htm](https://github.com/developit/htm) |
+| GUI | The system WebView ([webview_go](https://github.com/webview/webview_go): WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux) + React 18 + [antd](https://ant.design/) 5 + [htm](https://github.com/developit/htm) |
 | Frontend build | **None.** The libraries are UMD builds, inlined into a single HTML document together with the styles and application code. No npm, no bundler, no CDN (offline, proxies or a blocked CDN would all leave a blank window with no way for the user to tell why) |
 | Config | YAML ([yaml.v3](https://github.com/go-yaml/yaml)); the copy the GUI edits lives in the data directory |
 | Data | JSON and log files under `~/.pier/` — no database, no background daemon |
-| Platforms | The CLI builds and runs on macOS and Linux; the GUI is macOS 11+ only |
+| Platforms | macOS 11+ / Windows 10+ / Linux (the GUI needs GTK3 and WebKit2GTK 4.0); `./package.sh` builds all three at once |
 
 ## Install
 
@@ -139,15 +139,22 @@ Put `pier` on your `PATH` and it works from any project directory. Or install it
 go install github.com/zhengshangjinx/pier@latest
 ```
 
-### GUI (macOS 11+)
+### GUI
 
 ```bash
-./build-app.sh          # produces build/Pier.app
-open build/Pier.app
+./package.sh            # one package per platform, all of it under dist/
 ```
 
-All it needs is Go and the Xcode command line tools (`sips`, `iconutil` and `codesign` ship with
-macOS). The bundle is ad-hoc signed, which is enough for local use.
+| Platform | Artifact | Notes |
+| --- | --- | --- |
+| macOS | `Pier-<version>-macos-universal.dmg` / `.zip` | One binary for Intel and Apple silicon; the `.dmg` carries an `/Applications` alias, so installing is a drag |
+| Windows | `Pier-<version>-windows-amd64.zip` | Unzip and run (`pier.exe` CLI plus `pier-gui.exe`); the GUI needs the WebView2 runtime that ships with Windows |
+| Linux | `Pier-<version>-linux-amd64.tar.gz` / `-arm64.tar.gz` | Run `./install.sh` to install under `~/.local`; the GUI needs GTK3 and WebKit2GTK 4.0 |
+
+For a single local build: `./build-app.sh` produces `build/Pier.app` on macOS (all it needs is Go
+and the Xcode command line tools — `sips`, `iconutil` and `codesign` ship with macOS; the bundle is
+ad-hoc signed, which is enough for local use), and `go build -o pier-gui ./gui` does it on Windows
+and Linux.
 
 ## Quick start
 
@@ -250,6 +257,7 @@ it, so they never touch real data).
 ```bash
 go vet ./... && go test ./... -count=1     # checks
 ./build-app.sh                             # build build/Pier.app
+./package.sh                               # per-platform packages under dist/
 tools/shoot/shoot.py /tmp/a.png 1382 880   # render the UI to a PNG (demo data)
 ```
 
