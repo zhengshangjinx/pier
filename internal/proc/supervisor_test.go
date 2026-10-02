@@ -1,3 +1,8 @@
+//go:build !windows
+
+// 这一份的替身进程是 /bin/sh 加 sleep，认领也按进程组认，整套是照着 POSIX 写的。
+// Windows 需要的是另一套等价物，不是把这些改到能跑。
+
 package proc
 
 import (
@@ -214,7 +219,10 @@ func TestStartNamesProcessAfterService(t *testing.T) {
 	t.Setenv("PIER_HOME", t.TempDir()) // 别碰真实数据
 	dir := t.TempDir()
 	manifest := filepath.Join(dir, "pier.yaml")
-	yaml := "services:\n  - name: probe-name\n    dir: " + dir + "\n    kind: shell\n    run: \"sleep 30\"\n"
+	// 末尾多带一句 true：/bin/sh 会把「最后一条命令」原地 exec 掉，只写 "sleep 30"
+	// 的话这个进程转眼就变成 sleep、服务名当场丢掉，读到哪个名字全看 ps 赶在哪一步，
+	// 这条断言就得碰运气。多一句之后 sh 留在原地跑，名字才谈得上断言。
+	yaml := "services:\n  - name: probe-name\n    dir: " + dir + "\n    kind: shell\n    run: \"sleep 30; true\"\n"
 	if err := os.WriteFile(manifest, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -342,5 +350,46 @@ func TestManagedNameMatchesWholeProcessGroup(t *testing.T) {
 	}
 	if got := ManagedName(nil, self); got != "" {
 		t.Errorf("没有状态文件时不该认领，得到 %q", got)
+	}
+}
+
+// 状态文件写不进去时，启动必须整个回滚：进程收掉、记录也不留。
+//
+// 这条守的是一个很难自己发现的情形——服务被拉起来了，状态却没记上。此后界面上没有
+// 这一行、pier down 也找不着它，只能去活动监视器手工杀。
+//
+// 制造写入失败的办法是在 state.json.tmp 的位置先放一个目录（Save 走的是
+// 「写 .tmp 再改名」），不需要动权限，root 下跑也一样成立。
+//
+// 放在这里而不是 state_test.go：它验的是启动流程的回滚，替身进程与核对手段
+// （sleep + pgrep）都是 POSIX 那套，和这份文件里别的启动测试同进同出。
+func TestStartRollsBackWhenStateCannotBeWritten(t *testing.T) {
+	t.Setenv("PIER_HOME", t.TempDir()) // 别碰真实数据
+	dir := t.TempDir()
+	const token = "sleep 9876.5"
+	manifest := filepath.Join(dir, "pier.yaml")
+	yaml := "services:\n  - name: rollback-probe\n    dir: " + dir + "\n    kind: shell\n    run: \"" + token + "\"\n"
+	if err := os.WriteFile(manifest, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.StatePath()+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, _ := cfg.Find("rollback-probe")
+	err = New(cfg).Start(svc)
+	if err == nil {
+		t.Fatal("状态文件写不进去，启动却报成功了")
+	}
+	if !strings.Contains(err.Error(), "回收") {
+		t.Errorf("错误没有说明进程已被收掉：%v", err)
+	}
+	// 收干净了才返回：这里不该再有这个进程活着。
+	if _, err := sysOutput("pgrep", "-f", token); err == nil {
+		t.Errorf("状态没能记上，进程却还活着：%s", token)
 	}
 }

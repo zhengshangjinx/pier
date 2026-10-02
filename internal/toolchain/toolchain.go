@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/zhengshangjinx/pier/internal/execpath"
 )
 
 // Kind 是需要解析的工具类别。
@@ -319,7 +321,7 @@ func (r *Resolver) resolvePnpm() (*Tool, error) {
 	if nerr == nil {
 		nodePath = []string{n.Home}
 		for _, cand := range []string{filepath.Join(n.Home, "pnpm"), filepath.Join(r.home, "Library", "pnpm", "pnpm")} {
-			if isExec(cand) {
+			if execpath.Is(cand) {
 				return &Tool{Kind: Pnpm, Bin: cand, Home: n.Home, Source: "跟随 node", Reason: "跟随所选的 node",
 					Path: append([]string{filepath.Dir(cand)}, nodePath...)}, nil
 			}
@@ -339,21 +341,16 @@ func javaHome(dir string) (bin, home string, ok bool) {
 	if dir == "" {
 		return "", "", false
 	}
-	b := filepath.Join(dir, "bin", "java")
-	if !isExec(b) {
+	b := execpath.FirstIn(filepath.Join(dir, "bin"), "java")
+	if b == "" {
 		return "", "", false
 	}
 	return b, dir, true
 }
 
-func isExec(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
-}
-
 func firstExec(cands ...string) string {
 	for _, c := range cands {
-		if isExec(c) {
+		if execpath.Is(c) {
 			return c
 		}
 	}

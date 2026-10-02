@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/zhengshangjinx/pier/internal/execpath"
 )
 
 // 本文件回答「这个项目自己声明要哪个版本」。
@@ -108,7 +110,7 @@ func PythonVenv(dir string) (SDK, bool) {
 		}
 		for _, bin := range []string{"python3", "python"} {
 			p := filepath.Join(root, "bin", bin)
-			if isExec(p) {
+			if execpath.Is(p) {
 				v := cfg["version"]
 				if v == "" {
 					v = cfg["version_info"]
@@ -156,7 +158,7 @@ func GoWant(dir string) Want {
 // 第一次运行时自己去下，比本机随便哪个 mvn 都可靠。
 func MavenWrapper(dir string) string {
 	p := filepath.Join(dir, "mvnw")
-	if isExec(p) {
+	if execpath.Is(p) {
 		return p
 	}
 	return ""

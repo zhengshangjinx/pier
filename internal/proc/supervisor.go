@@ -16,10 +16,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/zhengshangjinx/pier/internal/config"
+	"github.com/zhengshangjinx/pier/internal/execpath"
 	"github.com/zhengshangjinx/pier/internal/toolchain"
 )
 
@@ -223,21 +223,25 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// 独立会话：服务不再受当前终端牵制，关掉终端或 Pier 退出都不会把它带走。
-	// 停止一律通过 pier down，走进程组信号。
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// 停止一律通过 pier down，走进程组信号。具体怎么脱离由平台层决定
+	// （unix 是 setsid，见 sys_unix.go）。
+	setDetached(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 %s 失败：%w", svc.Name, err)
 	}
 	pid := cmd.Process.Pid
+	// 记下这条服务那棵树的组号，事后按它认领（见 Entry.PGID）。
+	pgid := newSession(pid)
 	// 有意不 Wait：Pier 不是常驻监督进程，服务交给系统托管即可。
 	_ = cmd.Process.Release()
 
 	entry := &Entry{
 		PID:       pid,
-		PGID:      pid, // Setsid 后新会话的进程组号等于首进程 PID
+		PGID:      pgid,
 		Command:   displayCmd(plan.Run),
 		StartedAt: time.Now(),
 		LogPath:   logPath,
+		Ident:     processIdent(pid),
 	}
 	// 记状态与拉起进程必须同生共死：状态写不进去，这个进程就成了孤儿——界面看不见
 	// 它，pier down 也找不着它，只能去活动监视器手工杀。宁可这次启动不成立，
@@ -252,7 +256,7 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 		st.Services[svc.Name] = entry
 		return nil
 	}); err != nil {
-		_ = KillGroup(pid, pid, syscall.SIGKILL)
+		_ = KillGroup(pgid, pid, sigKill)
 		_ = WaitGone(pid, stopGrace)
 		return fmt.Errorf("服务 %s 已拉起但没能记入状态文件，已回收该进程：%w", svc.Name, err)
 	}
@@ -272,7 +276,7 @@ func (s *Supervisor) Stop(name string) error {
 		}
 		// 进程已不在，或 PID 已被系统复用：只清理记录，绝不发信号，
 		// 否则可能误杀一个恰好复用该 PID 的无关进程。
-		if !ProcessAlive(cur.PID) || !SameGroup(cur.PID, cur.PGID) {
+		if !sameEntry(cur) {
 			delete(state.Services, name)
 			gone = true
 			return nil
@@ -286,12 +290,12 @@ func (s *Supervisor) Stop(name string) error {
 		return fmt.Errorf("服务 %s 的 %w，已清理其记录", name, ErrAlreadyGone)
 	}
 
-	if err := KillGroup(e.PGID, e.PID, syscall.SIGTERM); err != nil {
+	if err := KillGroup(e.PGID, e.PID, sigTerm); err != nil {
 		return fmt.Errorf("停止 %s 失败：%w", name, err)
 	}
 	// 宽限期内没退就强杀整组；两次都失败才报错，且保留记录便于人工处理。
 	if !WaitGone(e.PID, stopGrace) {
-		_ = KillGroup(e.PGID, e.PID, syscall.SIGKILL)
+		_ = KillGroup(e.PGID, e.PID, sigKill)
 		if !WaitGone(e.PID, stopGrace) {
 			return fmt.Errorf("服务 %s 未能停止，请手工确认 PID %d", name, e.PID)
 		}
@@ -363,7 +367,7 @@ func (s *Supervisor) Status() ([]Status, error) {
 			}
 		}
 		if e, ok := state.Services[svc.Name]; ok {
-			if ProcessAlive(e.PID) && SameGroup(e.PID, e.PGID) {
+			if sameEntry(e) {
 				st.Running = true
 				st.PID = e.PID
 				st.PGID = e.PGID
@@ -490,13 +494,8 @@ func (s *Supervisor) resolveExe(name string, svc *config.Service, plan *config.P
 		dirs = append(dirs, t.Path...)
 	}
 	dirs = append(dirs, filepath.SplitList(os.Getenv("PATH"))...)
-	for _, d := range dirs {
-		if d == "" {
-			continue
-		}
-		if cand := filepath.Join(d, name); isExecutable(cand) {
-			return cand, nil
-		}
+	if cand := execpath.First(dirs, name); cand != "" {
+		return cand, nil
 	}
 	return "", fmt.Errorf("找不到可执行文件 %s，请确认已安装，或在「SDK 管理」里添加", name)
 }
@@ -505,11 +504,6 @@ func (s *Supervisor) resolveExe(name string, svc *config.Service, plan *config.P
 var cmdKinds = map[string]toolchain.Kind{
 	"go": toolchain.Go, "mvn": toolchain.Maven, "node": toolchain.Node, "pnpm": toolchain.Pnpm,
 	"python3": toolchain.Python, "python": toolchain.Python,
-}
-
-func isExecutable(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
 // runSync 同步执行编译等前置步骤，输出直接进日志，便于失败时排查。
@@ -523,22 +517,18 @@ func runSync(ctx context.Context, dir string, argv []string, env []string, logFi
 	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	setSyncGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	err := cmd.Run()
 	if ctx.Err() != nil && cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		killSyncTree(cmd.Process.Pid)
 	}
 	return err
 }
 
-// displayCmd 把 argv 还原成可读命令，sh -c 形式只展示真正的命令体。
+// displayCmd 把 argv 还原成可读命令，交给 shell 的那种只展示真正的命令体。
 func displayCmd(argv []string) string {
-	if len(argv) == 3 && argv[0] == "/bin/sh" && argv[1] == "-c" {
-		return argv[2]
-	}
-	return strings.Join(argv, " ")
+	return config.DisplayArgv(argv)
 }
 
 // ── 进程名：让服务在系统里叫它自己配置的那个名字 ─────────────────────────────
@@ -582,11 +572,11 @@ func displayCmd(argv []string) string {
 // sh -c 要补一个 $0：-c 后面没有操作数时 $0 就是 argv[0]，换了名字，脚本里引用的
 // $0 会从 /bin/sh 变成服务名。显式补一个，行为与改名之前一模一样。
 func namedArgv(argv []string, name string) []string {
-	if len(argv) == 0 {
+	if !namingByArgv0 || len(argv) == 0 {
 		return argv
 	}
 	out := append([]string{}, argv...)
-	if len(out) == 3 && out[0] == "/bin/sh" && out[1] == "-c" {
+	if _, ok := config.ShellScript(out); ok {
 		out = append(out, out[0])
 	}
 	out[0] = name
@@ -605,7 +595,7 @@ func namedArgv(argv []string, name string) []string {
 // 其余一律原样返回：Go 的产物在 plan.Run 里本来就叫服务名，java / python 挪了
 // 位置就起不来（见上面那段注释）。改名是锦上添花，服务起得来才是底线。
 func (s *Supervisor) resolveRunExec(argv []string, svc *config.Service, plan *config.Plan) []string {
-	if len(argv) == 0 {
+	if !namingByArgv0 || len(argv) == 0 {
 		return argv
 	}
 	// 读文件头、硬链都是 Pier 自己在做，相对路径要按服务目录解：run 里的
@@ -706,7 +696,7 @@ func (s *Supervisor) linkAsService(exe, name string) string {
 		}
 		// 只有确实是硬链出来的（nlink > 1）才敢替换。nlink 为 1 说明那是别人的
 		// 正经文件：Go 服务的编译产物就摆在这个路径上，删掉它服务就起不来了。
-		if st, ok := fb.Sys().(*syscall.Stat_t); !ok || st.Nlink < 2 {
+		if n, ok := hardlinkCount(link, fb); !ok || n < 2 {
 			return ""
 		}
 	}

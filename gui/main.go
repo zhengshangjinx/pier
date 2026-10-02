@@ -1,9 +1,11 @@
-//go:build darwin
-
 // Pier 图形界面入口。
 //
 // 单独一个二进制、单独一个包：命令行 Pier 与它共用 internal/ 下的全部逻辑，
 // 但两者的生命周期完全不同——命令行跑完即退，界面要长期驻留并持有窗口。
+//
+// 三个平台共用这一份：webview 库在 macOS 走 WKWebView、Linux 走 GTK WebKit、
+// Windows 走 WebView2，窗口动作里真正有平台差异的那几件（菜单栏、拖拽条、
+// 剪贴板、角标）各自落在 window_<平台>.go 里，这里只按同样的顺序调一遍。
 package main
 
 import (
@@ -32,7 +34,8 @@ func main() {
 	resize(w, width, height, webview.HintNone)
 	styleWindow(w.Window())
 	// 先按亮色刷一遍，页面挂载后会按实际主题再刷：不先刷的话，暗色启动的那一瞬
-	// 标题栏是系统默认的灰，和页面对不上。
+	// 标题栏是系统默认的灰，和页面对不上。（只在 macOS 上有效果，另外两个平台的
+	// 底色露不出来，见各自的 applyChrome。）
 	applyChrome(w.Window(), 0xF3/255.0, 0xF4/255.0, 0xF6/255.0, false)
 	// 绑定回调本身就跑在主线程上，这里仍然走 Dispatch：AppKit 只认主线程，
 	// 不把这个前提押在 webview 库的实现细节上。

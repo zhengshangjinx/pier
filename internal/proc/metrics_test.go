@@ -1,3 +1,7 @@
+//go:build !windows
+
+// 这一份里读的是 ps 的输出、量的是进程组，Windows 那边两样都换了实现。
+
 package proc
 
 import (

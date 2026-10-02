@@ -1,3 +1,7 @@
+//go:build !windows
+
+// 这一份用 /bin/sh 起替身进程，用量按进程组核对，整套是照着 POSIX 写的。
+
 package panel
 
 import (

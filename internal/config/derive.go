@@ -139,10 +139,10 @@ func (s *Service) planPython() (*Plan, error) {
 	return nil, fmt.Errorf("服务 %s 是 Python 类型但目录下没有 main.py，请显式指定 run", s.Name)
 }
 
-// shellCmd 把用户写的整条命令交给 sh 执行，以便使用管道、重定向等 shell 语法。
+// shellCmd 把用户写的整条命令交给 shell 执行，以便使用管道、重定向等 shell 语法。
 // 进程组会在停止时整组回收，多出的这层 shell 不会成为漏网的孤儿。
 func shellCmd(s string) []string {
-	return []string{"/bin/sh", "-c", s}
+	return ShellArgv(s)
 }
 
 func fileExists(p string) bool {
@@ -161,15 +161,5 @@ func (p *Plan) String() string {
 }
 
 func joinArgv(argv []string) string {
-	if len(argv) == 3 && argv[0] == "/bin/sh" && argv[1] == "-c" {
-		return argv[2]
-	}
-	out := ""
-	for i, a := range argv {
-		if i > 0 {
-			out += " "
-		}
-		out += a
-	}
-	return out
+	return DisplayArgv(argv)
 }

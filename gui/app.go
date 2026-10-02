@@ -283,7 +283,25 @@ func settingsScript() string {
 		}
 	}
 	raw, _ := json.Marshal(s)
-	return "window.__PIER_SETTINGS__ = " + string(raw) + ";"
+	return "window.__PIER_SETTINGS__ = " + string(raw) + ";" + nativeScript()
+}
+
+// nativeScript 把「这次是在什么样的一扇窗口里跑」告诉页面。
+//
+// 两件事都只有宿主知道：一是页面要不要给原生标题栏让出顶上那一条
+// （macOS 的窗口是铺满的，顶上 28px 是拖拽条，见 window_darwin.go），
+// 二是文件管理器在这个系统上叫什么——「在访达中显示」到 Windows 上得是「资源管理器」。
+func nativeScript() string {
+	name, _ := json.Marshal(fileManagerName)
+	return "window.__PIER_NATIVE__ = " + boolText(nativeWindowChrome) + ";" +
+		"window.__PIER_FILEMGR__ = " + string(name) + ";"
+}
+
+func boolText(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
 
 // saveSettings 保存主题。

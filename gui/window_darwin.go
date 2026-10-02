@@ -227,12 +227,17 @@ static void pierSetChrome(void *p, double r, double g, double b, int dark) {
 import "C"
 
 import (
-	"fmt"
-	"math"
 	"unsafe"
 
 	webview "github.com/webview/webview_go"
 )
+
+// nativeWindowChrome 为真表示页面铺到了标题栏底下，顶上那一条由原生代码接管
+// （见 app.css 的 .dc-native）。
+const nativeWindowChrome = true
+
+// fileManagerName 是 macOS 上文件管理器的叫法，界面上的「在 ✕ 中显示」用它。
+const fileManagerName = "访达"
 
 // styleWindow 在窗口创建后、页面加载前调用一次：装上菜单栏、让页面铺满整个窗口、
 // 垫回拖拽区，最后把窗口在屏幕可用区域里摆正。
@@ -261,36 +266,6 @@ func screenVisible() (float64, float64) {
 	var out [2]C.double
 	C.pierScreenVisible(&out[0])
 	return float64(out[0]), float64(out[1])
-}
-
-// defaultWindowSize 算初始窗口尺寸。
-//
-// 不写死一个数：写死的尺寸在小屏上顶满、在大屏上又显得局促，两头都不协调。
-// 按主屏可用区域取一个比例，四周都留出边来，再收在上下限之间——下限是原来那套
-// 尺寸（再小就摆不下侧栏加列表了），上限是免得在超宽屏上开出一扇太长的窗。
-// 屏幕比下限还小时以屏幕为准，宁可挤一点，也别开出一扇比屏幕还大的窗。
-func defaultWindowSize() (int, int) {
-	sw, sh := screenVisible()
-	if sw <= 0 || sh <= 0 {
-		return 1180, 780
-	}
-	w := int(math.Round(math.Min(sw*0.72, 1600)))
-	h := int(math.Round(math.Min(sh*0.9, 1000)))
-	w = max(w, 1180)
-	h = max(h, 780)
-	return min(w, int(sw)), min(h, int(sh))
-}
-
-// parseHex 解析 #RRGGBB。界面传来的是当前生效主题的 token，格式不对说明两边约定变了，要报出来。
-func parseHex(hex string) (r, g, b float64, err error) {
-	var R, G, B uint8
-	if len(hex) != 7 {
-		return 0, 0, 0, fmt.Errorf("底色 %q 不是 #RRGGBB 形式", hex)
-	}
-	if _, err := fmt.Sscanf(hex, "#%02x%02x%02x", &R, &G, &B); err != nil {
-		return 0, 0, 0, fmt.Errorf("底色 %q 不是 #RRGGBB 形式", hex)
-	}
-	return float64(R) / 255, float64(G) / 255, float64(B) / 255, nil
 }
 
 // copyText 把一段文字放进系统剪贴板。

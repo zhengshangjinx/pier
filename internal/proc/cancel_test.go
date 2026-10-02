@@ -1,3 +1,8 @@
+//go:build !windows
+
+// 这一份验的是「取消编译时整组一起结束」，靠的是 /bin/sh 与进程组，Windows 上
+// 要另写一套（那边的收树走父子链，见 sys_windows.go）。
+
 package proc
 
 import (

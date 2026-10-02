@@ -5,15 +5,12 @@ package main
 // 业务逻辑（写覆盖文件、校验、分组改名、端口占用判定）全部在 internal/manage，
 // 命令行的子命令用的是同一份实现。这里不再重复任何判断。
 //
-// 只有「让系统弹窗」这类纯界面动作留在本文件：它们依赖 macOS 的系统对话框，
-// 换成原生界面时会被 NSOpenPanel 取代，不属于业务层。
+// 只有「让系统弹窗」这一件事留在本文件：它按平台各写一份（picker_<平台>.go），
+// 不属于业务层。
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -183,18 +180,15 @@ func (a *app) configYAML() string {
 
 // exportConfig 把当前清单另存为一份 YAML 文件。
 //
-// 落盘的位置交给系统的存储对话框（osascript 的 choose file name），
-// 理由与 pickDirectory 那段相同：不引 NSOpenPanel，就不必给 build-app.sh
-// 添一层 Objective-C 桥接。同名文件系统自己会问「要替换吗」。
+// 落盘的位置交给系统的存储对话框，各平台用哪个命令弹见 picker_<平台>.go。
+// 同名文件由对话框自己问「要替换吗」。
 func (a *app) exportConfig() string {
 	text, err := a.mgr.ExportYAML()
 	if err != nil {
 		return errJSON(err.Error())
 	}
-	script := `set f to choose file name with prompt "导出清单" default name "pier.yaml"
-return POSIX path of f`
 
-	picked, canceled, err := runAppleScript(script)
+	picked, canceled, err := pickSavePath("pier.yaml")
 	if err != nil {
 		return errJSON("打开存储对话框失败：" + err.Error())
 	}
@@ -213,10 +207,7 @@ return POSIX path of f`
 // 选到 YAML 就整份只读，选回数据文件就又是可编辑的。命令行给不了 --config 的人
 // （从访达双击启动的）靠这一个入口拿到同样的能力。
 func (a *app) openConfig() string {
-	script := `set f to choose file with prompt "选择一份清单（pier.yaml 或 Pier 的数据文件）"
-return POSIX path of f`
-
-	picked, canceled, err := runAppleScript(script)
+	picked, canceled, err := pickOpenPath("选择一份清单（pier.yaml 或 Pier 的数据文件）")
 	if err != nil {
 		return errJSON("打开文件选择框失败：" + err.Error())
 	}
@@ -246,13 +237,17 @@ func (a *app) useLocalConfig() string {
 	return okJSON("已切回本机数据")
 }
 
-// ── 让系统弹出访达的目录选择框 ─────────────────────────────────────────────
+// ── 让系统弹出选择框 ───────────────────────────────────────────────────────
 //
-// 让用户手打路径是很糟的体验：路径长、容易打错，而且他有现成的访达。
-// 这里调 osascript 的 choose folder，弹的是系统原生选择框，支持拖拽、侧栏、最近使用。
+// 让用户手打路径是很糟的体验：路径长、容易打错，而且他有现成的文件管理器。
+// 各平台用哪个命令弹这些框见 picker_<平台>.go，这里只有两件共用的事：
+// 算起点，以及把回来的路径收拾干净。
 //
-// 不用 cgo 去调 NSOpenPanel：那需要引入 Objective-C 桥接，而 build-app.sh
-// 现在只依赖 Go + Xcode 命令行工具就能出包，为一个小弹窗破坏这一点不划算。
+// 不用 cgo 去调各家的原生接口：那要为三个平台各引一套桥接，
+// 而 build-app.sh 现在只依赖 Go + 各平台的命令行工具就能出包，
+// 为一个小弹窗破坏这一点不划算。
+//
+// 这一段只负责算起点：优先用用户已填的目录，其次工作空间根目录，最后回到用户主目录。
 func (a *app) pickDirectory(current string) string {
 	cfg := a.mgr.Config()
 
@@ -276,22 +271,13 @@ func (a *app) pickDirectory(current string) string {
 		}
 	}
 
-	script := `set p to choose folder with prompt "选择项目目录"`
-	if start != "" {
-		script += ` default location POSIX file ` + quoteAppleScript(start)
-	}
-	script += `
-	return POSIX path of p`
-
-	picked, canceled, err := runAppleScript(script)
+	picked, canceled, err := pickDir(start)
 	if err != nil {
 		return errJSON("打开目录选择框失败：" + err.Error())
 	}
 	if canceled || picked == "" {
 		return marshal(map[string]any{"ok": true, "canceled": true})
 	}
-	// POSIX path of 会给目录加上结尾斜杠，去掉它，存进数据文件和显示时都干净些。
-	picked = filepath.Clean(strings.TrimSuffix(picked, "/"))
 
 	out := map[string]any{"ok": true, "dir": picked}
 	// 顺带把相对路径算出来，界面可以直接填进表单并显示成相对工作空间的路径。
@@ -301,33 +287,16 @@ func (a *app) pickDirectory(current string) string {
 	return marshal(out)
 }
 
-// runAppleScript 跑一段 osascript，返回它 print 出来的那一行（已去掉首尾空白）。
+// cleanPath 收拾选择框回来的那串路径。
 //
-// 三种结果分开报：正常拿到值、用户取消、真出错。取消（AppleScript 的 -128，
-// 中文系统上 stderr 还可能写成别的字样，所以两个都认）不是故障，
-// 调用方据此安静地什么都不做——报一条红错误只会让人以为工具坏了。
-func runAppleScript(script string) (out string, canceled bool, err error) {
-	cmd := exec.Command("/usr/bin/osascript", "-e", script)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "-128") || strings.Contains(msg, "User canceled") {
-			return "", true, nil
-		}
-		return "", false, errors.New(firstNonEmpty(msg, err.Error()))
+// 去空白是因为命令行工具的输出常带一个换行；Clean 是为了结尾斜杠——
+// AppleScript 的 POSIX path 一定会带，存进数据文件和显示时都不干净。
+func cleanPath(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
 	}
-	return strings.TrimSpace(stdout.String()), false, nil
-}
-
-// quoteAppleScript 把字符串包成 AppleScript 的字符串字面量。
-//
-// AppleScript 里反斜杠和双引号都要转义。路径本身很少含这两个字符，
-// 但真含了而没转义，轻则弹框报语法错，重则把路径截断成另一个目录。
-func quoteAppleScript(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
+	return filepath.Clean(s)
 }
 
 func firstNonEmpty(vals ...string) string {

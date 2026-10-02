@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zhengshangjinx/pier/internal/execpath"
 )
 
 // 本文件回答「这台机器上装了哪些 SDK」。
@@ -254,7 +256,7 @@ func scan(home string, k Kind) []SDK {
 			out = append(out, s)
 		}
 	}
-	// sysAdd 用于主目录之外的位置（/Applications、JAVA_HOME、PATH…）。
+	// sysAdd 用于主目录之外的位置（JAVA_HOME、PATH…）。
 	sysAdd := func(s SDK, ok bool) {
 		if systemScan {
 			add(s, ok)
@@ -266,10 +268,16 @@ func scan(home string, k Kind) []SDK {
 		}
 		matches, _ := filepath.Glob(pattern)
 		for _, m := range matches {
-			if filepath.Base(m) == "current" {
+			if filepath.Base(m) == "current" && strings.Contains(pattern, "candidates") {
 				continue // sdkman 的 current 是指向某个版本的链接，版本本身会被扫到
 			}
 			add(fn(m, source))
+		}
+	}
+	// roots 扫这个平台自己的系统级安装位置，清单见 roots_<平台>.go。
+	roots := func() {
+		for _, r := range platformRoots(home, k) {
+			each(r.pattern, r.source, func(path, _ string) (SDK, bool) { return r.sdk(path) })
 		}
 	}
 	h := func(p ...string) string { return filepath.Join(append([]string{home}, p...)...) }
@@ -278,17 +286,12 @@ func scan(home string, k Kind) []SDK {
 	case Java:
 		j := func(dir, src string) (SDK, bool) { return javaSDK(dir, src) }
 		jdk := func(dir, src string) (SDK, bool) { return javaSDK(filepath.Join(dir, "Contents", "Home"), src) }
-		each("/Library/Java/JavaVirtualMachines/*", "系统 JDK 目录", jdk)
 		each(h("Library", "Java", "JavaVirtualMachines", "*"), "IntelliJ 下载", jdk)
 		each(h(".sdkman", "candidates", "java", "*"), "sdkman", j)
-		each("/opt/homebrew/opt/openjdk*/libexec/openjdk.jdk", "Homebrew", jdk)
-		each("/usr/local/opt/openjdk*/libexec/openjdk.jdk", "Homebrew", jdk)
 		each(h(".asdf", "installs", "java", "*"), "asdf", j)
 		each(h(".local", "share", "mise", "installs", "java", "*"), "mise", j)
 		each(h(".jenv", "versions", "*"), "jenv", j)
-		for _, app := range []string{"IntelliJ IDEA", "IntelliJ IDEA CE", "IntelliJ IDEA Ultimate", "Android Studio"} {
-			sysAdd(javaSDK(filepath.Join("/Applications", app+".app", "Contents", "jbr", "Contents", "Home"), "JetBrains 内置"))
-		}
+		roots()
 		if jh := os.Getenv("JAVA_HOME"); jh != "" {
 			sysAdd(javaSDK(jh, "JAVA_HOME"))
 		}
@@ -296,10 +299,9 @@ func scan(home string, k Kind) []SDK {
 	case Maven:
 		m := func(dir, src string) (SDK, bool) { return mavenSDK(dir, src) }
 		each(h(".sdkman", "candidates", "maven", "*"), "sdkman", m)
-		each("/opt/homebrew/opt/maven/libexec", "Homebrew", m)
-		each("/usr/local/opt/maven/libexec", "Homebrew", m)
 		each(h(".asdf", "installs", "maven", "*"), "asdf", m)
 		each(h(".local", "share", "mise", "installs", "maven", "*"), "mise", m)
+		roots()
 		if p := lookPath("mvn"); p != "" {
 			sysAdd(mavenSDK(filepath.Dir(filepath.Dir(realPath(p))), "PATH"))
 		}
@@ -314,9 +316,7 @@ func scan(home string, k Kind) []SDK {
 		each(h(".volta", "tools", "image", "node", "*"), "volta", n("bin/node"))
 		each(h(".asdf", "installs", "nodejs", "*"), "asdf", n("bin/node"))
 		each(h(".local", "share", "mise", "installs", "node", "*"), "mise", n("bin/node"))
-		each("/opt/homebrew/opt/node*", "Homebrew", n("bin/node"))
-		each("/usr/local/opt/node*", "Homebrew", n("bin/node"))
-		sysAdd(binSDK(Node, "/usr/local/bin/node", []string{"node"}, "官方安装包"))
+		roots()
 		if p := lookPath("node"); p != "" {
 			// 解开软链再交给 binSDK：/opt/homebrew/bin/node 的上一级是 /opt/homebrew，
 			// 那不是一个「安装根目录」，而且会和 Homebrew 那条同一个可执行文件各占一行。
@@ -337,26 +337,13 @@ func scan(home string, k Kind) []SDK {
 		each(h(".pyenv", "versions", "*"), "pyenv", py("bin/python3", "bin/python"))
 		each(h(".asdf", "installs", "python", "*"), "asdf", py("bin/python3"))
 		each(h(".local", "share", "mise", "installs", "python", "*"), "mise", py("bin/python3"))
-		// Homebrew 的 Python 老 formula 是 libexec/bin/python3，新的是 bin/python3，
-		// 两种都要试：只看 libexec 的话，装了 python@3.14 的人在界面上看不到它——
-		// 界面从访达启动，PATH 上没有 /opt/homebrew/bin，那条兜底也接不上。
-		each("/opt/homebrew/opt/python@3*", "Homebrew", py("libexec/bin/python3", "bin/python3", "bin/python"))
-		each("/usr/local/opt/python@3*", "Homebrew", py("libexec/bin/python3", "bin/python3", "bin/python"))
-		each("/Library/Frameworks/Python.framework/Versions/3*", "python.org", py("bin/python3"))
-		// /usr/bin/python3 在没装命令行工具的机器上是个会弹安装框的占位程序，
-		// 所以只在命令行工具真的在时，直接用它背后的那个解释器。
-		sysAdd(binSDK(Python, "/Library/Developer/CommandLineTools/usr/bin/python3", nil, "Xcode 命令行工具"))
+		roots()
 		if p := lookPath("python3"); p != "" && p != "/usr/bin/python3" {
 			sysAdd(binSDK(Python, realPath(p), nil, "PATH"))
 		}
 
 	case Go:
 		g := func(dir, src string) (SDK, bool) { return goSDK(dir, src) }
-		// 带版本号的 formula（go@1.24）和 go 一样常见，要一并收进来：只认 /opt/homebrew/opt/go
-		// 的话，装 go@1.24 的人在这里会看到一个空的 Go 分组。
-		each("/opt/homebrew/opt/go*/libexec", "Homebrew", g)
-		each("/usr/local/opt/go*/libexec", "Homebrew", g)
-		each("/usr/local/go", "官方安装包", g)
 		each(h("sdk", "go*"), "golang.org/dl", g)
 		// go.mod 要求更新的 Go 时，go 命令会把整套 SDK 下载进模块缓存，那是真能跑的一个 Go。
 		// IDEA 的 GOROOT 下拉也是从这里列出来的。
@@ -365,6 +352,7 @@ func scan(home string, k Kind) []SDK {
 		each(h(".gvm", "gos", "*"), "gvm", g)
 		each(h(".asdf", "installs", "golang", "*", "go"), "asdf", g)
 		each(h(".local", "share", "mise", "installs", "go", "*"), "mise", g)
+		roots()
 		if p := lookPath("go"); p != "" {
 			sysAdd(goSDK(filepath.Dir(filepath.Dir(realPath(p))), "PATH"))
 		}
@@ -384,8 +372,9 @@ var jdkVendors = map[string]string{
 // javaSDK 读 JDK 根目录下的 release 文件拿版本与发行商，这比从目录名里猜可靠得多
 // （jenv、asdf、手动解压的目录名五花八门）。
 func javaSDK(dir, source string) (SDK, bool) {
-	bin := filepath.Join(dir, "bin", "java")
-	if !isExec(bin) {
+	// 用 FirstIn 而不是拼死一个 "bin/java"：Windows 上那个文件叫 java.exe。
+	bin := execpath.FirstIn(filepath.Join(dir, "bin"), "java")
+	if bin == "" {
 		return SDK{}, false
 	}
 	s := SDK{Kind: Java, Home: dir, Bin: bin, Source: source}
@@ -407,8 +396,9 @@ func javaSDK(dir, source string) (SDK, bool) {
 var mavenCoreRe = regexp.MustCompile(`^maven-core-(\d[\w.-]*)\.jar$`)
 
 func mavenSDK(dir, source string) (SDK, bool) {
-	bin := filepath.Join(dir, "bin", "mvn")
-	if !isExec(bin) {
+	// Windows 上 mvn 是个 .cmd 批处理，不是无后缀的 shell 脚本。
+	bin := execpath.FirstIn(filepath.Join(dir, "bin"), "mvn")
+	if bin == "" {
 		return SDK{}, false
 	}
 	s := SDK{Kind: Maven, Home: dir, Bin: bin, Source: source}
@@ -427,8 +417,8 @@ func mavenSDK(dir, source string) (SDK, bool) {
 }
 
 func goSDK(dir, source string) (SDK, bool) {
-	bin := filepath.Join(dir, "bin", "go")
-	if !isExec(bin) {
+	bin := execpath.FirstIn(filepath.Join(dir, "bin"), "go")
+	if bin == "" {
 		return SDK{}, false
 	}
 	s := SDK{Kind: Go, Home: dir, Bin: bin, Source: source}
@@ -460,13 +450,17 @@ func binSDK(k Kind, path string, names []string, source string) (SDK, bool) {
 			names = []string{"python3", "python"}
 		}
 		for _, n := range names {
-			if c := filepath.Join(path, "bin", n); isExec(c) {
+			if c := execpath.FirstIn(filepath.Join(path, "bin"), n); c != "" {
 				bin = c
 				break
 			}
 		}
+	} else if c := execpath.FirstIn(filepath.Dir(path), filepath.Base(path)); c != "" {
+		// 给的是可执行文件本身，但可能没带扩展名：Windows 上 node 实际叫 node.exe。
+		// FirstIn 会先试扩展名、最后试原名，unix 上这一步就等于原样返回。
+		bin = c
 	}
-	if bin == "" || !isExec(bin) {
+	if bin == "" || !execpath.Is(bin) {
 		return SDK{}, false
 	}
 	s := SDK{Kind: k, Home: filepath.Dir(filepath.Dir(bin)), Bin: bin, Source: source}

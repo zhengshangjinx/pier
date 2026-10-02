@@ -1,3 +1,7 @@
+//go:build !windows
+
+// 这一份用的是 lsof 与 Setsid，Windows 上端口归属改问系统、进程也不再分会话。
+
 package proc
 
 import (

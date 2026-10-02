@@ -1,9 +1,16 @@
+//go:build !windows
+
+// 这一份测的是 sys_unix.go 里那套东西（按绝对路径找 lsof / ps），Windows 那边
+// 端口和进程都直接问系统，没有对应的实现，也就没有对应的测试。
+
 package proc
 
 import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zhengshangjinx/pier/internal/execpath"
 )
 
 // TestSysBinIgnoresPath 是这次 PATH 依赖问题的回归护栏。
@@ -22,7 +29,7 @@ func TestSysBinIgnoresPath(t *testing.T) {
 		if !filepath.IsAbs(got) {
 			t.Errorf("%s 解析结果不是绝对路径：%q", name, got)
 		}
-		if !isExecutable(got) {
+		if !execpath.Is(got) {
 			t.Errorf("%s 解析到 %q，但它不可执行", name, got)
 		}
 	}

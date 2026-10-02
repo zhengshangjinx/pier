@@ -80,7 +80,11 @@
   var demoQuery = new URLSearchParams(location.search).has("demo");
   var DEMO = demoQuery || missingBindings.length > 0;
   var bridgeBroken = missingBindings.length > 0 && !demoQuery;
-  if (!DEMO) document.documentElement.classList.add("dc-native");
+  // 窗口形态与文件管理器的叫法都由宿主注入（见 gui/app.go 的 nativeScript）：
+  // 前者决定页面要不要给标题栏让出顶上那一条，后者只是措辞，别处一样是这三家。
+  var NATIVE = window.__PIER_NATIVE__ === true;
+  var FILEMGR = window.__PIER_FILEMGR__ || "访达";
+  if (!DEMO && NATIVE) document.documentElement.classList.add("dc-native");
 
   // call 统一处理「后端返回 JSON 字符串」这件事：解析、并把 ok:false 变成异常，
   // 这样调用方可以用 try/catch 而不是每次手写 if (!r.ok)。
@@ -1204,7 +1208,7 @@
     var menu = {
       items: [
         { key: "logs", label: "查看日志", icon: e(IconDoc) },
-        { key: "dir", label: "在访达中打开目录", icon: e(IconFolder) },
+        { key: "dir", label: "在" + FILEMGR + "中打开目录", icon: e(IconFolder) },
         // 不带这条服务的运行状态、也不写盘，只把清单里的定义抄成一段 YAML，
         // 所以谁都能点：只读清单下「复制出去贴到别处」正是它唯一的用处。
         { key: "yaml", label: "复制成 YAML", icon: e(IconDoc) },
@@ -2382,7 +2386,7 @@
                     <${A.Button} type="text" className="dc-quiet" disabled=${empty}
                       onClick=${function () { props.onOpenLog(luSvc.name); }}>查看<//>
                     <${A.Button} type="text" className="dc-quiet" icon=${e(IconFolder)}
-                      disabled=${empty} title="在访达中显示最新那份"
+                      disabled=${empty} title=${"在" + FILEMGR + "中显示最新那份"}
                       onClick=${function () { call("revealLog", luSvc.name).catch(function () {}); }}/>
                     <${A.Button} type="text" className="dc-quiet" danger
                       disabled=${empty} loading=${busy === "clear:" + luSvc.name}
@@ -2680,7 +2684,7 @@
             onChange=${function (ev) { setAuto(ev.target.checked); }}>自动刷新<//>
         <//>
         <${A.Button} onClick=${function () { load(); }}>立即刷新<//>
-        <${A.Button} onClick=${function () { call("revealLog", name); }}>在访达中显示<//>
+        <${A.Button} onClick=${function () { call("revealLog", name); }}>${"在" + FILEMGR + "中显示"}<//>
       <//>`}>
       ${err ? html`<${A.Alert} type="error" showIcon message=${err}/>` : null}
       <div className="dc-log-bar">
@@ -2709,7 +2713,7 @@
         <${A.Button} onClick=${copyAll} disabled=${!d.text}>复制全部<//>
       </div>
       ${d.truncated ? html`<${A.Alert} type="info" showIcon style=${{ marginBottom: 10 }}
-        message="日志很长，这里只显示末尾部分。完整内容用「在访达中显示」打开。"/>` : null}
+        message=${"日志很长，这里只显示末尾部分。完整内容用「在" + FILEMGR + "中显示」打开。"}/>` : null}
       ${d.text ? html`<pre className=${"dc-log" + (wrap ? "" : " dc-log-nowrap")} ref=${preRef}
           onScroll=${onScroll}>${spans}</pre>`
         : loading ? html`<div className="dc-log-wait"><${A.Spin}/></div>`
@@ -3526,7 +3530,7 @@
                 // 第一行「现在看的是哪份数据」原来挂在侧栏底部（一行弱化色的文字加行尾一个
                 // 文件夹按钮）。它和下面三项本来就是同一件事，分开摆着的时候，得先在侧栏
                 // 找到那行、再回顶栏点「⋯」才能把「换一份清单」做完。点这一行＝原来那个
-                // 文件夹按钮（打开数据目录 / 在访达中显示）。
+                // 文件夹按钮（打开数据目录 / 在文件管理器里显示）。
                 //
                 // 代价说清楚：SDK 管理、日志那两页上没有「⋯」，那两页就看不到自己在看哪份
                 // 数据了。那两页本来也不跟清单里写了什么打交道（一个说本机装了哪些 SDK，

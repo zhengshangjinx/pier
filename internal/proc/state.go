@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
 // Entry 是状态文件里一个服务的运行记录。
 type Entry struct {
-	PID  int `json:"pid"`
+	PID int `json:"pid"`
+	// PGID 是这条服务那棵树的组号：unix 上是 setsid 之后的进程组号（等于首进程 PID），
+	// 端口归属、资源求和的键都用它。Windows 上没有可读的进程组，这里写的就是首进程 PID，
+	// 「还是不是那个进程」另由 Ident 核对。
 	PGID int `json:"pgid"`
 	// Command 记录本次启动实际执行的命令，便于事后核对跑的是哪个模块。
 	Command string `json:"command"`
@@ -19,6 +21,15 @@ type Entry struct {
 	StartedAt time.Time `json:"startedAt"`
 	// LogPath 是本次启动使用的日志文件。
 	LogPath string `json:"logPath"`
+	// Ident 是「这个进程还是当初记录的那一个」的辅助凭据，unix 上留空。
+	//
+	// unix 靠 PGID 就够：进程组号等于首进程 PID，PID 被系统复用时组号对不上。
+	// Windows 没有进程组号可查，改记进程创建时间——**PID 会被复用，创建时间不会**，
+	// 这是那边唯一能挡住「杀错一个恰好拿到同一个号的无辜进程」的东西。
+	//
+	// omitempty 不能去掉：unix 上它是空串，省掉之后 state.json 的内容与加这个字段
+	// 之前逐字节相同（TestStateFileUnchangedByPlatformFields 钉着）。
+	Ident string `json:"ident,omitempty"`
 }
 
 // State 是状态文件的根结构。只有 Pier 启动的服务才会出现在这里；
@@ -107,7 +118,8 @@ func lockState(path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开状态锁失败：%w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	// 加锁与解锁各平台不一样（flock / LockFileEx），见 sys_unix.go 与 sys_windows.go。
+	if err := lockFile(f); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("锁定状态文件失败：%w", err)
 	}
@@ -115,7 +127,7 @@ func lockState(path string) (*os.File, error) {
 }
 
 func unlockState(f *os.File) {
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	unlockFile(f)
 	_ = f.Close()
 }
 
@@ -138,7 +150,7 @@ func ManagedName(st *State, pid int) string {
 		}
 		// 首领还活着才算数：记录留着而进程早没了时，PGID 可能已经被系统分给了
 		// 别人，光比组号会认错。这和 Status 判「在跑」是同一个口径。
-		if ProcessAlive(e.PID) && SameGroup(pid, e.PGID) {
+		if inEntryGroup(pid, e) {
 			return name
 		}
 	}
@@ -157,7 +169,7 @@ func RunningNames(path string) (map[string]bool, error) {
 	}
 	out := map[string]bool{}
 	for name, e := range st.Services {
-		if e != nil && ProcessAlive(e.PID) && SameGroup(e.PID, e.PGID) {
+		if sameEntry(e) {
 			out[name] = true
 		}
 	}

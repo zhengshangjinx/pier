@@ -1,11 +1,5 @@
 package proc
 
-import (
-	"fmt"
-	"strconv"
-	"strings"
-)
-
 // Usage 是一组进程合计的资源占用。
 type Usage struct {
 	// CPU 是这一组进程当前的 CPU 占用合计，单位百分比，单核满载是 100。
@@ -35,11 +29,14 @@ func (u *Usage) add(cpu float64, rssKB int64) {
 // Metrics 是一次资源采样。
 //
 // 它算的是「一组进程」而不是「一个进程」，这是这里的核心口径：Pier 启动服务时
-// 设了 Setsid，整个服务树独占一个进程组（进程组号等于首进程 PID），而记录在案的
-// PID 往往是 mvn / pnpm 这类壳，真正吃资源的在孙进程里。只按 PID 读，
-// Java 服务会得到一个接近零的假数字。
+// 让整个服务树独占一个进程组，而记录在案的 PID 往往是 mvn / pnpm 这类壳，
+// 真正吃资源的在孙进程里。只按 PID 读，Java 服务会得到一个接近零的假数字。
+//
+// 组的号在 macOS / Linux 上就是进程组号，在 Windows 上没有可读的进程组，
+// 改用「往上找到的那个 Pier 服务」——对调用方是同一件事：拿 state 里记的那个号
+// 到 Groups 里取自己这一组（见 groupKey）。
 type Metrics struct {
-	// Groups 按进程组号聚合，含本机所有进程组。服务的进程组号记在 state.json 的
+	// Groups 按组号聚合，含本机所有进程组。服务的组号记在 state.json 的
 	// Entry.PGID 里，调用方拿它来这里取自己关心的那几组。
 	Groups map[int]Usage
 	// Self 是 root 那棵进程树的合计，已扣掉 exclude 里的子树。
@@ -50,46 +47,18 @@ type Metrics struct {
 	Self Usage
 }
 
-// procFields 是采样要的那几列。
+// procRow 是采样里的一行进程记录。
 //
-// 每列都带 `=`：不带的话 ps 会自己加表头，而表头里有 %cpu 这样的名字，
-// 解析时就得先判断「这行是不是表头」。带 `=` 直接就没有表头。
-const procFields = "pid=,ppid=,pgid=,%cpu=,rss="
-
-// procRow 是 ps 输出里的一行。
+// 三个平台各自把自己那份系统信息填进同一套字段：unix 直接来自 ps 的
+// pid/ppid/pgid 三列，Windows 来自进程快照（那里没有进程组，pgid 留 0，
+// 分组交给 groupKey 去认）。
 type procRow struct {
 	pid, ppid, pgid int
 	cpu             float64
 	rssKB           int64
 }
 
-// parseProcRows 解析 ps -axo procFields 的输出。
-//
-// 逐行按空白切，不按列宽切：命令行里有空格会带偏定宽解析，而这里取的又都是
-// 最左边几列数字，按词切最稳。行数不对、数字解析不出来的一律跳过——少一行是
-// 少一个进程的数，为它把整次采样作废没必要；反过来，「一行都解析不出来」由调用方
-// 当成错误处理，那才是真的出问题了。
-func parseProcRows(out []byte) []procRow {
-	var rows []procRow
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) != 5 {
-			continue
-		}
-		pid, e1 := strconv.Atoi(f[0])
-		ppid, e2 := strconv.Atoi(f[1])
-		pgid, e3 := strconv.Atoi(f[2])
-		cpu, e4 := strconv.ParseFloat(f[3], 64)
-		rss, e5 := strconv.ParseInt(f[4], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil {
-			continue
-		}
-		rows = append(rows, procRow{pid: pid, ppid: ppid, pgid: pgid, cpu: cpu, rssKB: rss})
-	}
-	return rows
-}
-
-// SampleMetrics 采一次全机进程用量（按进程组聚合，外加 root 那棵树）。
+// SampleMetrics 采一次全机进程用量（按组聚合，外加 root 那棵树）。
 //
 // root 是要单独核算的那棵进程树的根（Pier 传自己的 PID），exclude 是要从这棵树里
 // 摘掉的进程号（Pier 传它正在跑的那些服务）。
@@ -103,32 +72,30 @@ func parseProcRows(out []byte) []procRow {
 // 父进程是 1、且各自独占会话，既不在 root 这棵树里、也不在 Pier 的进程组里，
 // 所以「面板自身」不含它们。界面上的措辞要如实说明，不能让这个数看起来是全部。
 func SampleMetrics(root int, exclude map[int]bool) (*Metrics, error) {
-	out, err := sysOutput("ps", "-axo", procFields)
+	rows, err := sampleProcesses()
 	if err != nil {
-		return nil, fmt.Errorf("读取进程用量失败：%w", err)
-	}
-	rows := parseProcRows(out)
-	// 一行都解析不出来说明不是「个别行异常」，而是 ps 的用法或输出格式变了。
-	// 这时候返回全零的采样比返回错误危险得多：界面上会是一片「0.0%」，
-	// 看着像「什么都不占」，与「读不到」完全不是一回事。
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("ps 没有给出任何可解析的进程记录")
+		return nil, err
 	}
 
 	m := &Metrics{Groups: make(map[int]Usage, len(rows))}
 	byPID := make(map[int]procRow, len(rows))
 	kids := make(map[int][]int, len(rows))
 	for _, r := range rows {
-		g := m.Groups[r.pgid]
-		g.add(r.cpu, r.rssKB)
-		m.Groups[r.pgid] = g
 		byPID[r.pid] = r
 		kids[r.ppid] = append(kids[r.ppid], r.pid)
+	}
+	// 分组要等整张表建好再做：Windows 上「这一行属于哪一组」得顺着父子链往上找，
+	// 单看一行是看不出来的。
+	for _, r := range rows {
+		key := groupKey(r, byPID, exclude)
+		g := m.Groups[key]
+		g.add(r.cpu, r.rssKB)
+		m.Groups[key] = g
 	}
 
 	// 从 root 往下走一遍，摘掉 exclude 里的子树。
 	//
-	// seen 不只是去重：ps 一次输出里的父子关系是自洽的、不会成环，但真拿到异常数据时，
+	// seen 不只是去重：一次快照里的父子关系是自洽的、不会成环，但真拿到异常数据时，
 	// 没有它就是一段转不出去的循环。root 自身也在这个集合里，Self 要把它算上。
 	seen := map[int]bool{root: true}
 	queue := []int{root}

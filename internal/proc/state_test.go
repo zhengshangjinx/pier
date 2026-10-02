@@ -5,12 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/zhengshangjinx/pier/internal/config"
 )
 
 // 状态文件的每次更新都是「读出整份、改一处、写回整份」，两个人同时来就会丢更新：
@@ -84,33 +81,3 @@ func TestUpdateStateAbortsOnError(t *testing.T) {
 // pier down 也找不着它，只能去活动监视器手工杀——正是这次要堵的那类问题。
 // 制造写入失败的办法是在 state.json.tmp 的位置先放一个目录（Save 走的是
 // 「写 .tmp 再改名」），不需要动权限，root 下跑也一样成立。
-func TestStartRollsBackWhenStateCannotBeWritten(t *testing.T) {
-	t.Setenv("PIER_HOME", t.TempDir()) // 别碰真实数据
-	dir := t.TempDir()
-	const token = "sleep 9876.5"
-	manifest := filepath.Join(dir, "pier.yaml")
-	yaml := "services:\n  - name: rollback-probe\n    dir: " + dir + "\n    kind: shell\n    run: \"" + token + "\"\n"
-	if err := os.WriteFile(manifest, []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(cfg.StatePath()+".tmp", 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	svc, _ := cfg.Find("rollback-probe")
-	err = New(cfg).Start(svc)
-	if err == nil {
-		t.Fatal("状态文件写不进去，启动却报成功了")
-	}
-	if !strings.Contains(err.Error(), "回收") {
-		t.Errorf("错误没有说明进程已被收掉：%v", err)
-	}
-	// 收干净了才返回：这里不该再有这个进程活着。
-	if _, err := sysOutput("pgrep", "-f", token); err == nil {
-		t.Errorf("状态没能记上，进程却还活着：%s", token)
-	}
-}
