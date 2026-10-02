@@ -2,12 +2,16 @@
 #
 # 按各平台的习惯分别打包，产物全部落在 dist/：
 #
-#   Pier-<版本>-macos-universal.dmg / .zip   里面是 Pier.app（Intel 与 Apple 芯片同一份）
-#   Pier-<版本>-macos-universal.tar.gz       命令行 pier
-#   Pier-<版本>-windows-amd64.zip            命令行 pier.exe + 界面 pier-gui.exe
-#   Pier-<版本>-linux-amd64.tar.gz           同上 + .desktop + 图标 + install.sh
+#   Pier-<版本>-macos-universal.dmg / .zip   里面是 Pier.app（Intel 与 Apple 芯片同一份），
+#                                            内含界面 pier-gui 与命令行 pier
+#   Pier-<版本>-macos-universal.tar.gz       只有命令行 pier（从上面那份 .app 里取）
+#   Pier-<版本>-windows-amd64.zip            界面 pier-gui.exe + bin\pier.exe + install.cmd
+#   Pier-<版本>-linux-amd64.tar.gz           界面与命令行 + .desktop + 图标 + install.sh
 #   Pier-<版本>-linux-arm64.tar.gz
 #   SHA256SUMS                               以上全部的校验和
+#
+# 三个平台都是「下载一份、跑一次安装、得到一个图标加一个命令」：macOS 靠 .app 里多带一份
+# 命令行 + README 里那句软链，Windows 靠 install.cmd，Linux 靠 install.sh。
 #
 # 用法：./package.sh [版本号]（不给就用 0.1.0）
 #
@@ -37,20 +41,18 @@ trap 'rm -rf "$WORK"; rm -f "$SYSO"' EXIT
 # ── macOS ────────────────────────────────────────────────────────────────
 # .app 的组装交给 build-app.sh：那是本机调试也在用的同一条路，
 # 两份组装方式迟早会在 Info.plist 或签名上分叉。
-echo "==> macOS：界面（通用二进制）"
+echo "==> macOS：界面 + 命令行（通用二进制）"
 PIER_VERSION="$VERSION" "$MODULE_DIR/build-app.sh" >/dev/null
 # 落地时目录名必须还是 Pier.app：`cp -R` 的目标名就是新名字，
 # 写成 "$WORK/app" 的话 zip 与 dmg 里那个 bundle 会变成叫「app」，
 # 拖进「应用程序」之后访达显示的就是它（bundle 名看的是目录名）。
 cp -R "$APP" "$WORK/Pier.app"
 
-echo "==> macOS：命令行（通用二进制）"
-mkdir -p "$WORK/macos-cli"
-for arch in arm64 amd64; do
-	CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" \
-		go build -trimpath -ldflags "-s -w" -o "$WORK/macos-cli/pier.$arch" .
-done
-lipo -create -output "$WORK/macos-cli/pier" "$WORK/macos-cli/pier.arm64" "$WORK/macos-cli/pier.amd64"
+# 命令行那一份就在 .app 里（见 build-app.sh），这儿直接取，不另编一遍：dmg、zip、
+# tar.gz 三个产物里是同一个文件，不会出现「装出来的 pier 和单独下的是两份」。
+# 从 bundle 里拿的这份带着 ad-hoc 签名（codesign 对整个 bundle 签的），不影响运行。
+mkdir -p "$WORK/pier-$VERSION-macos-universal"
+cp "$APP/Contents/MacOS/pier" "$WORK/pier-$VERSION-macos-universal/"
 
 # zip：不需要挂载就能拿到 .app，解压出来直接拖进「应用程序」。
 ditto -c -k --sequesterRsrc --keepParent "$WORK/Pier.app" "$DIST/Pier-$VERSION-macos-universal.zip"
@@ -63,8 +65,6 @@ ln -s /Applications "$WORK/dmg/应用程序"
 hdiutil create -quiet -volname "Pier $VERSION" -srcfolder "$WORK/dmg" -ov -format UDZO \
 	"$DIST/Pier-$VERSION-macos-universal.dmg"
 
-mkdir -p "$WORK/pier-$VERSION-macos-universal"
-mv "$WORK/macos-cli/pier" "$WORK/pier-$VERSION-macos-universal/"
 tar -czf "$DIST/Pier-$VERSION-macos-universal.tar.gz" -C "$WORK" "pier-$VERSION-macos-universal"
 
 # ── Windows ──────────────────────────────────────────────────────────────
@@ -76,9 +76,13 @@ if ! command -v x86_64-w64-mingw32-gcc >/dev/null; then
 	echo "    缺少 mingw-w64（brew install mingw-w64），跳过 Windows 两份" >&2
 else
 	WINDIR="$WORK/pier-$VERSION-windows-amd64"
-	mkdir -p "$WINDIR"
+	# 命令行那一份放进 bin\ 而不摆在根上：解压出来第一眼看到的就是一个 Pier 图标
+	# （pier-gui.exe）加一个 install.cmd。install.ps1 会把两份都装进
+	# %LOCALAPPDATA%\Programs\Pier 再把那个目录加进 PATH，命令仍然只是 `pier`。
+	# 根上并排摆两个「应用程序」，光看名字分不出该点哪个——这正是要收掉的东西。
+	mkdir -p "$WINDIR/bin"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-		go build -trimpath -ldflags "-s -w" -o "$WINDIR/pier.exe" .
+		go build -trimpath -ldflags "-s -w" -o "$WINDIR/bin/pier.exe" .
 	# 界面这一份要 -H=windowsgui：不给的话双击之后会先弹一个黑色控制台窗口，
 	# 关掉它界面也跟着没了。
 	#
@@ -95,6 +99,8 @@ else
 		go build -trimpath -ldflags "-s -w -H=windowsgui" -o "$WINDIR/pier-gui.exe" ./gui
 	rm -f "$SYSO"
 	cp "$MODULE_DIR/tools/pkg/windows/README.txt" "$WINDIR/README.txt"
+	cp "$MODULE_DIR/tools/pkg/windows/install.ps1" "$WINDIR/install.ps1"
+	cp "$MODULE_DIR/tools/pkg/windows/install.cmd" "$WINDIR/install.cmd"
 	(cd "$WORK" && zip -qr "$DIST/Pier-$VERSION-windows-amd64.zip" "pier-$VERSION-windows-amd64")
 fi
 

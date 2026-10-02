@@ -145,16 +145,38 @@ go install github.com/zhengshangjinx/pier@latest
 ./package.sh            # one package per platform, all of it under dist/
 ```
 
-| Platform | Artifact | Notes |
+| Platform | Artifact | How to install |
 | --- | --- | --- |
-| macOS | `Pier-<version>-macos-universal.dmg` / `.zip` | One binary for Intel and Apple silicon; the `.dmg` carries an `/Applications` alias, so installing is a drag |
-| Windows | `Pier-<version>-windows-amd64.zip` | Unzip and run (`pier.exe` CLI plus `pier-gui.exe`); the GUI needs the WebView2 runtime that ships with Windows |
-| Linux | `Pier-<version>-linux-amd64.tar.gz` / `-arm64.tar.gz` | Run `./install.sh` to install under `~/.local`; the GUI needs GTK3 and WebKit2GTK 4.0 |
+| macOS | `Pier-<version>-macos-universal.dmg` / `.zip` | Open the `.dmg` and drag Pier into Applications |
+| Windows | `Pier-<version>-windows-amd64.zip` | Unzip and double-click `install.cmd` |
+| Linux | `Pier-<version>-linux-amd64.tar.gz` / `-arm64.tar.gz` | Unzip and run `sh install.sh` |
 
-For a single local build: `./build-app.sh` produces `build/Pier.app` on macOS (all it needs is Go
-and the Xcode command line tools — `sips`, `iconutil` and `codesign` ship with macOS; the bundle is
-ad-hoc signed, which is enough for local use), and `go build -o pier-gui ./gui` does it on Windows
-and Linux.
+All three end up looking the same: **one Pier in your launcher, one `pier` in your terminal**, and
+none of them needs admin rights. Windows installs under `%LOCALAPPDATA%\Programs\Pier`, Linux under
+`~/.local`; on macOS the `.app` *is* the install — both the GUI `pier-gui` and the CLI `pier` live
+inside it, and the `/Applications` alias in the `.dmg` makes the drag the whole install.
+
+On macOS the CLI sits inside the `.app`, so one symlink gives you the command:
+
+```bash
+ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier   # needs write access there
+```
+
+If you would rather not touch `/usr/local/bin`, put
+`alias pier=/Applications/Pier.app/Contents/MacOS/pier` in `~/.zshrc` instead.
+
+Runtime dependencies: nothing extra on macOS; the Windows GUI needs the WebView2 runtime that ships
+with Windows 11 (and usually comes along with Edge on 10); the Linux GUI needs GTK3 and WebKit2GTK
+4.0. The CLI needs no graphics libraries on any of them.
+
+For headless machines and CI, `Pier-<version>-macos-universal.tar.gz` is the CLI on its own. The
+Windows and Linux archives always carry both — skip `install.cmd` / `install.sh` and run
+`bin\pier.exe` directly if you prefer.
+
+For a single local build: `./build-app.sh` produces `build/Pier.app` on macOS (the CLI is inside it
+too; all it needs is Go and the Xcode command line tools — `sips`, `iconutil` and `codesign` ship
+with macOS; the bundle is ad-hoc signed, which is enough for local use), and
+`go build -o pier-gui ./gui` does it on Windows and Linux.
 
 ## Quick start
 

@@ -29,6 +29,41 @@ Windows 用 Homebrew 的 mingw-w64（`CC` 和 `CXX` 都要给，cgo 编 `.cc` �
 Linux 走 `tools/pkg/linux` 的容器（Ubuntu 22.04，因为 webview 的 cgo 指令写死了
 `webkit2gtk-4.0`，24.04 起只剩 4.1）。
 
+**三个平台的产物是同一个形状：下载一份、装一次、得到一个图标加一个命令。**
+界面二进制一律叫 `pier-gui`、命令行一律叫 `pier`（Windows 上加 `.exe`）。Windows 那份
+曾经在压缩包根上并排摆着 `pier-gui.exe` 与 `pier.exe`，两个都写着「应用程序」，光看名字
+分不出该点哪个——收成一份就是为这个。`pier-gui.exe` **不改名**：`gui/app.go` 里那句
+「pier-gui 启动：…」是三平台共用的，为 Windows 改文件名就得动共用代码，正好踩上面那条
+底线；三个平台同名本身也更好认。
+
+- macOS：`build-app.sh` 把两份都编进 `Pier.app/Contents/MacOS/`。**必须排在 `codesign`
+  之前**——codesign 签的是整个 bundle，签完再往里塞文件签名当场失效（`--verify` 报
+  unsealed contents）。`package.sh` 里那份只有命令行的 `.tar.gz` 直接从
+  `$APP/Contents/MacOS/pier` 取，**不另编一遍**：dmg、zip、tar.gz 三个产物里是同一个
+  文件，两处各写一遍编译参数迟早一处带 `-s -w` 一处不带。取出来那份带着 ad-hoc 签名，
+  不影响单独运行。用户侧就一句
+  `ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier`。
+- Windows：`pier.exe` 落在 `bin\` 里，压缩包根上只留 `pier-gui.exe` + `install.cmd`
+  + `README.txt`。安装脚本在 `tools/pkg/windows/install.{cmd,ps1}`：`.cmd` 是双击入口，
+  `.ps1` 干活。**`.ps1` 必须存成带 BOM 的 UTF-8**——Windows PowerShell 5.1 对没有 BOM
+  的脚本按系统代码页（简体中文上是 GBK）解码，里面的中文会变成乱码；**`.cmd` 反过来
+  绝不能有 BOM**（cmd.exe 把 BOM 那三个字节当成一条命令去执行），也不要在里面 echo 中文
+  或加 `chcp 65001`（前者跟着控制台代码页走，后者会改变 cmd 接着读这个文件的解码方式）。
+  `rem` 注释里的中文倒是安全：cmd 把整行吞掉，UTF-8 的多字节序列里也不会出现 `&`、`|`、
+  `>` 这些能改变解析的字符。但**注释里不能出现 `%`**——`rem` 行照样做变量展开，
+  `%~dp0` 那种会被当成命令执行并报致命错误（SS64 上写明的一条）。
+- Windows 改 PATH 有三条不能走的路：**不能用 `setx`**（超过 1024 字符的值被静默截断）；
+  **不能用 `[Environment]::SetEnvironmentVariable(..., "User")`**（写回去一律是 REG_SZ，
+  而 Windows 自带的用户 PATH 里本来就有 REG_EXPAND_SZ 的项——`%USERPROFILE%\AppData\
+  Local\Microsoft\WindowsApps` 就是一条——一改就变成不展开的字面量，Store 装的 python、
+  `winget` 那些别名会跟着从 PATH 上掉下去）；**绝不能碰系统级 PATH**（那要管理员，
+  也会影响别的账户）。所以 `install.ps1` 直接读写 `HKCU\Environment`：读的时候给
+  `RegistryValueOptions::DoNotExpandEnvironmentNames`，写的时候沿用
+  `GetValueKind` 拿到的原类型。改完还要广播一次 `WM_SETTINGCHANGE`，否则资源管理器
+  （以及从它启动的终端）不重读环境变量，用户新开的窗口里照样找不到 `pier`，
+  得注销一次——而「装完就能用」正是这个脚本存在的全部意义。
+- Linux：`tools/pkg/linux/install.sh` 装到 `~/.local`，本来就是这个形状，没动过。
+
 那三处官方源在连不上的网络上能逐个换掉：`tools/pkg/linux/Dockerfile` 顶上四个 build-arg
 （`BASE_IMAGE` / `APT_MIRROR` / `GO_DL_URL` / `GOPROXY`），默认全是官方地址，
 `package.sh` 会把同名的 `PIER_*` 环境变量转过去。这台机器上必须给：Docker Hub 的拉取

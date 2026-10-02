@@ -135,15 +135,37 @@ go install github.com/zhengshangjinx/pier@latest
 ./package.sh            # 按平台各打一份，产物全部落在 dist/
 ```
 
-| 平台 | 产物 | 说明 |
+| 平台 | 产物 | 怎么装 |
 | --- | --- | --- |
-| macOS | `Pier-<版本>-macos-universal.dmg` / `.zip` | Intel 与 Apple 芯片同一份；`.dmg` 里有一个「应用程序」替身，拖过去就是安装 |
-| Windows | `Pier-<版本>-windows-amd64.zip` | 解压即用（`pier.exe` 命令行 + `pier-gui.exe` 界面），界面要系统自带的 WebView2 运行时（Win11 自带，Win10 多半也随 Edge 装好了） |
-| Linux | `Pier-<版本>-linux-amd64.tar.gz` / `-arm64.tar.gz` | 解压后 `./install.sh` 装到 `~/.local`；界面要 GTK3 与 WebKit2GTK 4.0 |
+| macOS | `Pier-<版本>-macos-universal.dmg` / `.zip` | 打开 `.dmg`，把 Pier 拖进「应用程序」 |
+| Windows | `Pier-<版本>-windows-amd64.zip` | 解压后双击 `install.cmd` |
+| Linux | `Pier-<版本>-linux-amd64.tar.gz` / `-arm64.tar.gz` | 解压后 `sh install.sh` |
 
-只想在本机打一份也行：macOS 上 `./build-app.sh` 打包出 `build/Pier.app`（只要本机有 Go 和
-Xcode 命令行工具即可，`sips`、`iconutil`、`codesign` 都是系统自带的；生成的 App 用临时签名，
-自己用不需要开发者证书）；Windows / Linux 上 `go build -o pier-gui ./gui`。
+三个平台装完是同一个样子：**启动台/开始菜单/应用菜单里一个 Pier，终端里一个 `pier`**。
+Windows 装到 `%LOCALAPPDATA%\Programs\Pier`，Linux 装到 `~/.local`，都不需要管理员；
+macOS 就是那个 `.app` 本身——界面 `pier-gui` 与命令行 `pier` 都在它里面，
+`.dmg` 里的「应用程序」替身拖过去就装完了。
+
+macOS 上 `pier` 在 `.app` 里面，做一次软链就有命令了：
+
+```bash
+ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier   # 要 /usr/local/bin 的写权限
+```
+
+不想动 `/usr/local/bin`，就把 `alias pier=/Applications/Pier.app/Contents/MacOS/pier`
+写进 `~/.zshrc`。
+
+各平台的运行时依赖：macOS 直接能跑；Windows 的界面要系统自带的 WebView2 运行时
+（Win11 自带，Win10 多半也随 Edge 装好了）；Linux 的界面要 GTK3 与 WebKit2GTK 4.0。
+命令行那一份哪边都不依赖图形库。
+
+没有图形界面的机器（CI、服务器）上装 macOS 那份只有命令行的
+`Pier-<版本>-macos-universal.tar.gz` 即可；Windows 与 Linux 的包里两份都在，
+不跑 `install.cmd` / `install.sh`、直接用 `bin\pier.exe` 也照样能用。
+
+只想在本机打一份也行：macOS 上 `./build-app.sh` 打包出 `build/Pier.app`（里面已经带着
+`pier`；只要本机有 Go 和 Xcode 命令行工具即可，`sips`、`iconutil`、`codesign` 都是系统自带的；
+生成的 App 用临时签名，自己用不需要开发者证书）；Windows / Linux 上 `go build -o pier-gui ./gui`。
 
 ## 快速开始
 

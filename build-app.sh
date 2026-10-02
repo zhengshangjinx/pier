@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 #
-# 把图形界面组装成一个可双击运行的 macOS .app。
+# 把界面与命令行组装成一个可双击运行的 macOS .app。
+#
+# bundle 里是两份可执行文件：Info.plist 的 CFBundleExecutable 指的 pier-gui（双击跑的就是它），
+# 以及命令行 pier。三个平台都是「下载一份、得到一个图标加一个命令」，macOS 这边就是把
+# pier 一并放进 bundle，用户拖进「应用程序」之后做一次软链就有命令了（见 README）。
+# 单独放一份命令行 tar.gz 是给没有桌面环境的机器与 CI 用的，那份从这里取现成的。
 #
 # 生成的 bundle 只在本机使用，用临时签名（ad-hoc）即可，不需要开发者证书。
 # 也不用安装任何额外工具：只要有 Go 和 Xcode 命令行工具（sips、iconutil、codesign
@@ -16,6 +21,7 @@ MODULE_DIR="$(pwd)"
 BUILD_DIR="$MODULE_DIR/build"
 APP="$BUILD_DIR/Pier.app"
 BIN_NAME="pier-gui"
+CLI_NAME="pier"
 
 # 默认出通用二进制（arm64 + x86_64），Intel 机器与 Apple 芯片共用一个 .app。
 # 调试时设 PIER_ARCH=arm64 只编本机那一份，省掉一半编译时间。
@@ -34,12 +40,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "==> 编译界面二进制（${PIER_ARCH}）"
+echo "==> 编译二进制（${PIER_ARCH}）"
 # 服务清单在 Pier 自己的数据目录里，不再需要把某份 YAML 的路径编进二进制。
 #
 # 界面这一层必须开 cgo——webview 是一份 C++ 源码，macOS 上要链 -framework WebKit。
 # 而 cgo 交叉编译到另一个架构不需要额外工具链：Xcode 的 SDK 本身是两套架构都在的，
 # clang 用 -arch 就能出另一份，所以这里直接编两次再 lipo 拼起来。
+#
+# 命令行的 pier 与 package.sh 里那份 tar.gz 是同一个文件：那边直接从 bundle 里拿，
+# 不另编一遍。两处各写一遍编译参数，迟早一处带 -s -w 一处不带。
 case "$PIER_ARCH" in
 universal)
 	# macho 目录放中间产物，不落进 build/（那里只放最终产物）。
@@ -51,20 +60,27 @@ universal)
 		# 里面不该带着打包这台机器的目录结构。
 		CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
 			go build -trimpath -o "$MACHO/$BIN_NAME.$arch" ./gui
+		CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" \
+			go build -trimpath -ldflags "-s -w" -o "$MACHO/$CLI_NAME.$arch" .
 	done
 	lipo -create -output "$APP/Contents/MacOS/$BIN_NAME" \
 		"$MACHO/$BIN_NAME.arm64" "$MACHO/$BIN_NAME.amd64"
+	lipo -create -output "$APP/Contents/MacOS/$CLI_NAME" \
+		"$MACHO/$CLI_NAME.arm64" "$MACHO/$CLI_NAME.amd64"
 	;;
 arm64 | amd64)
 	CGO_ENABLED=1 GOOS=darwin GOARCH="$PIER_ARCH" \
 		go build -trimpath -o "$APP/Contents/MacOS/$BIN_NAME" ./gui
+	CGO_ENABLED=0 GOOS=darwin GOARCH="$PIER_ARCH" \
+		go build -trimpath -ldflags "-s -w" -o "$APP/Contents/MacOS/$CLI_NAME" .
 	;;
 *)
 	echo "PIER_ARCH 只能是 universal / arm64 / amd64，收到：$PIER_ARCH" >&2
 	exit 1
 	;;
 esac
-lipo -archs "$APP/Contents/MacOS/$BIN_NAME" 2>/dev/null | sed 's/^/    架构：/'
+lipo -archs "$APP/Contents/MacOS/$BIN_NAME" 2>/dev/null | sed 's/^/    界面架构：/'
+lipo -archs "$APP/Contents/MacOS/$CLI_NAME" 2>/dev/null | sed 's/^/    命令行架构：/'
 
 echo "==> 生成图标"
 go run ./tools/mkicon "$WORK/icon.png"
@@ -130,10 +146,23 @@ PLIST
 echo "==> 临时签名"
 # 不签名的话，Apple Silicon 上从访达启动可能被拦下。
 # 临时签名是本机行为，不需要证书，也不联网。
+#
+# 两份可执行文件都得在签名之前就位：codesign 是对整个 bundle 签的，往签好的 bundle 里
+# 再塞文件会让签名失效（--verify 报 unsealed contents），所以上面那段不能挪到这里来。
+#
+# 还得从里往外签。Contents/MacOS/ 里除 CFBundleExecutable 之外的可执行文件，codesign 按
+# 嵌套代码处理——它不会顺手替你签，碰到没签的就丢一句 code object is not signed at all
+# 把整个 bundle 一起判失败。而 lipo 拼出来的胖二进制不带签名（Go 链接器只签它自己刚编出来
+# 的那一份，所以只编 arm64 / amd64 时看不出这个问题，唯独 universal 会踩到）。
+for bin in "$BIN_NAME" "$CLI_NAME"; do
+	codesign --force --sign - "$APP/Contents/MacOS/$bin" 2>/dev/null || true
+done
 if codesign --force --sign - "$APP" 2>/dev/null; then
 	echo "    已签名（ad-hoc）"
 else
-	echo "    签名失败——不影响本机运行，但首次打开可能需要在「系统设置 → 隐私与安全性」里放行"
+	# 这条走 stderr：package.sh 把本脚本的输出整个丢进 /dev/null，写 stdout 的话，
+	# 发出去的包没签上名也没人知道。
+	echo "    签名失败——不影响本机运行，但首次打开可能需要在「系统设置 → 隐私与安全性」里放行" >&2
 fi
 
 echo "==> 刷新系统的应用登记"
@@ -146,3 +175,4 @@ touch "$APP"
 echo
 echo "完成：$APP"
 echo "双击打开，或执行：open '$APP'"
+echo "命令行在：$APP/Contents/MacOS/$CLI_NAME"

@@ -1,0 +1,5 @@
+# Windows 的批处理与 PowerShell 脚本一律以 CRLF 检出：仓库里存 LF，检出时换回来。
+# 只靠 core.autocrlf 不行——它是 input 时只换进去、不换回来，克隆下来打出的包里
+# install.cmd 就是 LF 的（.cmd 带 LF 在 cmd.exe 里有踩坑的余地）。
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
