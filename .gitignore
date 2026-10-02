@@ -50,3 +50,8 @@ nbdist/
 # 截图工具是一次性脚本，跑起来会掉字节码；shoot.py 本身要提交。
 __pycache__/
 *.pyc
+
+# Windows 的图标资源。package.sh 打包时用 windres 生成到 gui/ 下（.syso 必须和包同目录
+# 才认），走完就删；万一中途出错留下，对 mac 与 Linux 的构建也是惰性的——.syso 只在
+# 文件名匹配当前 GOOS/GOARCH 时才进链接。
+gui/*.syso

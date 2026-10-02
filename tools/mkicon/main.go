@@ -9,9 +9,14 @@
 //
 // 画法：先在 4 倍尺寸上画，再降采样。圆角和三角形边缘靠超采样获得平滑过渡，
 // 比手工写抗锯齿简单得多，也不需要任何图像库。
+//
+// 输出格式看扩展名：.png 出 1024 一档（macOS 的 .icns 与 Linux 的图标都由它缩），
+// .ico 出 Windows 要的一整组尺寸。两边画的是同一份 render()。
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
@@ -19,6 +24,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -78,15 +84,156 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		fail(err)
 	}
-	f, err := os.Create(out)
+	var err error
+	if strings.EqualFold(filepath.Ext(out), ".ico") {
+		err = writeICO(out, render())
+	} else {
+		err = writePNG(out, render())
+	}
 	if err != nil {
 		fail(err)
 	}
-	defer f.Close()
-	if err := png.Encode(f, render()); err != nil {
-		fail(err)
-	}
 	fmt.Println("图标已生成：" + out)
+}
+
+func writePNG(path string, img *image.RGBA) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
+// icoSizes 是 ICO 里装的几档。
+//
+// 16 与 32 是任务栏和标题栏，48 是资源管理器的中图标，256 是大图标视图。
+// 256 那一档不用 PNG 压：见 dibEntry 的说明。
+var icoSizes = []int{16, 24, 32, 48, 64, 128, 256}
+
+// writeICO 把 render() 的结果写成一个多档 ICO。
+//
+// 与 PNG 那条路分开写、也不共用 downsample：见 resample 的说明。
+func writeICO(path string, src *image.RGBA) error {
+	entries := make([][]byte, len(icoSizes))
+	for i, size := range icoSizes {
+		entries[i] = dibEntry(resample(src, size))
+	}
+
+	var buf bytes.Buffer
+	// ICONDIR：保留位、类型（1 是图标不是光标）、档数。
+	buf.Write([]byte{0, 0, 1, 0})
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(len(entries)))
+
+	// 目录在前、图像在后，所以每档的偏移要把整个目录先算进去。
+	offset := 6 + 16*len(entries)
+	for i, e := range entries {
+		size := icoSizes[i]
+		// 宽高各一个字节，256 在这里写 0——这个字段是 uint8，256 装不下，
+		// 约定用 0 表示，不是漏填。
+		buf.WriteByte(byte(size % 256))
+		buf.WriteByte(byte(size % 256))
+		buf.WriteByte(0) // 调色板颜色数，真彩色图标恒为 0
+		buf.WriteByte(0) // 保留位
+		_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
+		_ = binary.Write(&buf, binary.LittleEndian, uint16(32))
+		_ = binary.Write(&buf, binary.LittleEndian, uint32(len(e)))
+		_ = binary.Write(&buf, binary.LittleEndian, uint32(offset))
+		offset += len(e)
+	}
+	for _, e := range entries {
+		buf.Write(e)
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// dibEntry 把一张图编成 ICO 里的一档，格式是 BITMAPINFOHEADER + 像素 + 掩码。
+//
+// 不用 PNG 压：PNG 装在 ICO 里要 Vista 之后才认，BMP 从 Windows 95 起就是这个格式。
+// 这里画的是图标不是照片，多出来的几十 KB 不值得拿兼容性去换。
+func dibEntry(img *image.RGBA) []byte {
+	w := img.Bounds().Dx()
+	h := img.Bounds().Dy()
+	// 1bpp 掩码，每行按 4 字节对齐。32 位图标其实用不到它（透明靠 alpha 通道），
+	// 但这个字段在格式里是必须有的，全填 0 表示「没有额外的镂空」。
+	maskRow := (w + 31) / 32 * 4
+
+	var buf bytes.Buffer
+	// 字段一个一个按各自的宽度写，不合并成 uint32：中间那几个是 WORD，
+	// 合并之后两个 16 位字段谁在高位就得靠心算，写反了是一份看着没问题的坏图标。
+	put := func(v ...any) {
+		for _, x := range v {
+			_ = binary.Write(&buf, binary.LittleEndian, x)
+		}
+	}
+	put(
+		uint32(40), // biSize
+		uint32(w),  // biWidth
+		// 高度要写成两倍——图像之后还跟着掩码，格式把这个总和当成高度。
+		uint32(h*2),
+		uint16(1),            // biPlanes
+		uint16(32),           // biBitCount
+		uint32(0),            // biCompression = BI_RGB
+		uint32(w*h*4),        // biSizeImage
+		uint32(0), uint32(0), // 分辨率
+		uint32(0), uint32(0), // 调色板
+	)
+
+	// 像素自下而上、每像素 BGRA。
+	for y := h - 1; y >= 0; y-- {
+		for x := 0; x < w; x++ {
+			c := img.RGBAAt(x, y)
+			buf.Write([]byte{c.B, c.G, c.R, c.A})
+		}
+	}
+	for i := 0; i < maskRow*h; i++ {
+		buf.WriteByte(0)
+	}
+	return buf.Bytes()
+}
+
+// resample 把图按区域平均缩到 size×size。
+//
+// 不能沿用 downsample：那是按整数倍降的，而 ICO 要的 24 与 48 都不是 1024 的整除数，
+// 取整会让这两档偏掉一两个像素。区域平均对任意比例都成立。
+//
+// 颜色按 alpha 加权再还原（RGBA() 给的是已乘 alpha 的值）：直接对未加权的值取平均，
+// 圆角外侧那些全透明的像素（颜色是 0）会把边缘往黑里拉，缩到 16 那一档就是一圈黑边。
+func resample(src *image.RGBA, size int) *image.RGBA {
+	sw, sh := src.Bounds().Dx(), src.Bounds().Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		y0, y1 := y*sh/size, (y+1)*sh/size
+		if y1 <= y0 {
+			y1 = y0 + 1
+		}
+		for x := 0; x < size; x++ {
+			x0, x1 := x*sw/size, (x+1)*sw/size
+			if x1 <= x0 {
+				x1 = x0 + 1
+			}
+			var sr, sg, sb, sa, n uint64
+			for yy := y0; yy < y1; yy++ {
+				for xx := x0; xx < x1; xx++ {
+					r, g, b, a := src.At(xx, yy).RGBA()
+					sr, sg, sb, sa = sr+uint64(r>>8), sg+uint64(g>>8), sb+uint64(b>>8), sa+uint64(a>>8)
+					n++
+				}
+			}
+			// 把 alpha 加权平均再还原成直通值；整块全透明时颜色无从谈起，留 0。
+			var out color.RGBA
+			if sa > 0 {
+				out = color.RGBA{
+					R: uint8(sr * 0xFF / sa),
+					G: uint8(sg * 0xFF / sa),
+					B: uint8(sb * 0xFF / sa),
+					A: uint8(sa / n),
+				}
+			}
+			dst.SetRGBA(x, y, out)
+		}
+	}
+	return dst
 }
 
 func fail(err error) {

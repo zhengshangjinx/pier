@@ -71,7 +71,9 @@ func main() {
 	}
 
 	w.Init(settingsScript())
-	w.SetHtml(buildHTML())
+	// 投递方式三平台不同：Windows 上 SetHtml 有 2MB 上限，装不下整个界面，
+	// 改走落盘 + 导航。见 load_windows.go / load_other.go。
+	loadUI(w, buildHTML())
 
 	// 启动信息写到 stderr：从访达双击启动时看不到任何终端输出，
 	// 出问题时这行是唯一能确认「它到底加载了哪份清单」的线索。

@@ -29,7 +29,10 @@ APP="$MODULE_DIR/build/Pier.app"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# SYSO 是打包途中临时放进 gui/ 的 Windows 图标资源，见 Windows 那一节。正常路径上
+# 编完就删；这里再兜一次，脚本中途出错也不会把它留在源码树里。
+SYSO="$MODULE_DIR/gui/rsrc_windows_amd64.syso"
+trap 'rm -rf "$WORK"; rm -f "$SYSO"' EXIT
 
 # ── macOS ────────────────────────────────────────────────────────────────
 # .app 的组装交给 build-app.sh：那是本机调试也在用的同一条路，
@@ -78,9 +81,19 @@ else
 		go build -trimpath -ldflags "-s -w" -o "$WINDIR/pier.exe" .
 	# 界面这一份要 -H=windowsgui：不给的话双击之后会先弹一个黑色控制台窗口，
 	# 关掉它界面也跟着没了。
+	#
+	# 图标得走 Windows 自己的资源段：go build 出来的 exe 里没有 .rsrc 这一节，
+	# 任务栏、资源管理器与标题栏就只给一个默认图标。用 mkicon 画一份多档 .ico，
+	# windres 编成 COFF。.syso 必须和包同目录才会被采用，所以先落进 gui/、编完删掉
+	# （顶层 trap 也兜了一遍）——它的名字带着 _windows_amd64，mac 与 Linux 编的时候
+	# 根本不会看它。
+	go run ./tools/mkicon "$WORK/pier.ico"
+	printf '1 ICON "%s"\n' "$WORK/pier.ico" >"$WORK/pier.rc"
+	x86_64-w64-mingw32-windres -O coff -o "$SYSO" "$WORK/pier.rc"
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
 		CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
 		go build -trimpath -ldflags "-s -w -H=windowsgui" -o "$WINDIR/pier-gui.exe" ./gui
+	rm -f "$SYSO"
 	cp "$MODULE_DIR/tools/pkg/windows/README.txt" "$WINDIR/README.txt"
 	(cd "$WORK" && zip -qr "$DIST/Pier-$VERSION-windows-amd64.zip" "pier-$VERSION-windows-amd64")
 fi
