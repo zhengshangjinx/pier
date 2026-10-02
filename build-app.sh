@@ -17,6 +17,14 @@ BUILD_DIR="$MODULE_DIR/build"
 APP="$BUILD_DIR/Pier.app"
 BIN_NAME="pier-gui"
 
+# 默认出通用二进制（arm64 + x86_64），Intel 机器与 Apple 芯片共用一个 .app。
+# 调试时设 PIER_ARCH=arm64 只编本机那一份，省掉一半编译时间。
+PIER_ARCH="${PIER_ARCH:-universal}"
+
+# 版本号写进 Info.plist。package.sh 会用 PIER_VERSION 覆盖它；
+# 直接跑这个脚本时用下面这个默认值。
+VERSION="${PIER_VERSION:-0.1.0}"
+
 echo "==> 清理 build 目录"
 # build/ 只放打包产物，整个清掉重建：只删当前这个 .app 的话，改过名的旧产物
 # 会一直留在里面，而访达里两个图标并排摆着，点错的那个是打不开的。
@@ -26,9 +34,37 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "==> 编译界面二进制"
+echo "==> 编译界面二进制（${PIER_ARCH}）"
 # 服务清单在 Pier 自己的数据目录里，不再需要把某份 YAML 的路径编进二进制。
-go build -o "$APP/Contents/MacOS/$BIN_NAME" ./gui
+#
+# 界面这一层必须开 cgo——webview 是一份 C++ 源码，macOS 上要链 -framework WebKit。
+# 而 cgo 交叉编译到另一个架构不需要额外工具链：Xcode 的 SDK 本身是两套架构都在的，
+# clang 用 -arch 就能出另一份，所以这里直接编两次再 lipo 拼起来。
+case "$PIER_ARCH" in
+universal)
+	# macho 目录放中间产物，不落进 build/（那里只放最终产物）。
+	MACHO="$WORK/macho"
+	mkdir -p "$MACHO"
+	for arch in arm64 amd64; do
+		echo "    - darwin/$arch"
+		# -trimpath 去掉二进制里的本机路径（/Users/<名字>/...）：这份 .app 是要发出去的，
+		# 里面不该带着打包这台机器的目录结构。
+		CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
+			go build -trimpath -o "$MACHO/$BIN_NAME.$arch" ./gui
+	done
+	lipo -create -output "$APP/Contents/MacOS/$BIN_NAME" \
+		"$MACHO/$BIN_NAME.arm64" "$MACHO/$BIN_NAME.amd64"
+	;;
+arm64 | amd64)
+	CGO_ENABLED=1 GOOS=darwin GOARCH="$PIER_ARCH" \
+		go build -trimpath -o "$APP/Contents/MacOS/$BIN_NAME" ./gui
+	;;
+*)
+	echo "PIER_ARCH 只能是 universal / arm64 / amd64，收到：$PIER_ARCH" >&2
+	exit 1
+	;;
+esac
+lipo -archs "$APP/Contents/MacOS/$BIN_NAME" 2>/dev/null | sed 's/^/    架构：/'
 
 echo "==> 生成图标"
 go run ./tools/mkicon "$WORK/icon.png"
@@ -72,7 +108,7 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>__PIER_VERSION__</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleIconFile</key>
@@ -86,6 +122,10 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# 版本号在上面那份 plist 里留成了占位符，这里替换掉——写死一个数的话，
+# 打包时改的那一处和这里就会各说各的。
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist" >/dev/null
 
 echo "==> 临时签名"
 # 不签名的话，Apple Silicon 上从访达启动可能被拦下。

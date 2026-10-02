@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Pier
+Comment=本地多项目服务的启停工具
+Comment[en]=Start and stop local project services
+Exec=pier-gui
+Icon=pier
+Terminal=false
+Categories=Development;
+# 与 GTK 报给窗口管理器的 WM_CLASS 对齐（它取的是可执行文件的名字）：
+# 不对齐的话，任务栏上跑着的窗口与菜单里的这一项会被当成两个应用，各占一个图标。
+StartupWMClass=pier-gui
