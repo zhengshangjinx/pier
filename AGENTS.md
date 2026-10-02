@@ -58,10 +58,10 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
 
 - **平台差异一律靠文件后缀（build tag）分家，共用文件里不写 `runtime.GOOS` 分支**：
   分了家才看得见谁是谁，`runtime.GOOS` 一旦长进共用代码就再也摘不干净。
-  成对的有 `window_<平台>.go`、`picker_<平台>.go`、`internal/proc/sys_{unix,windows}.go`、
-  `internal/toolchain/roots_<平台>.go`、`internal/config/shell_{unix,windows}.go`、
-  `internal/sysopen/open_<平台>.go`。改 Windows 那一侧不该让 mac / Linux 编出来的东西
-  有任何变化（底线）。
+  成对的有 `window_<平台>.go`、`picker_<平台>.go`、`load_{windows,other}.go`、
+  `internal/proc/sys_{unix,windows}.go`、`internal/toolchain/roots_<平台>.go`、
+  `internal/config/shell_{unix,windows}.go`、`internal/sysopen/open_<平台>.go`。
+  改 Windows 那一侧不该让 mac / Linux 编出来的东西有任何变化（底线）。
 - 共用文件里不许出现平台专有的东西（`/usr/bin/osascript`、「访达」、`syscall.Kill`）。
   页面上那两处平台差异是后端注入的：有没有原生拖拽条 `window.__PIER_NATIVE__`，
   文件管理器叫什么 `window.__PIER_FILEMGR__`（`gui/app.go` 的 `nativeScript`）。
@@ -76,6 +76,20 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
 - Windows 上的「浏览…」等三个选择框走系统自带的 Windows PowerShell 5.1
   （路径写死到 `%SystemRoot%`，不走 PATH：pwsh 7 没有 `-STA`），
   Linux 上走 zenity / kdialog / qarma。
+- **Windows 上界面要落盘再导航，不能走 `SetHtml`**：`SetHtml` 在 Windows 上落到 WebView2 的
+  `NavigateToString`，微软文档写明只收 2MB 以下的 HTML，超出的部分直接丢掉且不返回错误——
+  表现就是窗口打开一片白，不看文档根本看不出是页面太大。整个界面拼出来约 2.2MB
+  （antd 一个包就 1.8MB），正好越线。`gui/load_windows.go` 把它写到 `cache/ui/index.html`
+  再 `Navigate` 到 `file://`；WKWebView 的 `loadHTMLString` 与 WebKitGTK 的 `load_html`
+  都没有这条限制，`gui/load_other.go` 保持原样。走 `file://` 不影响与后端的通道：绑定是
+  `window.chrome.webview.postMessage`，不挑来源（原先的 `about:blank` 同样是不透明源）。
+  `TestPageExceedsWebView2SetHtmlLimit` 钉着这个前提。
+- **Windows 的图标只能靠 exe 自己的资源段**：`go build` 出来的 exe 没有 `.rsrc`，
+  任务栏、资源管理器与标题栏只给一个默认图标。`package.sh` 用 `tools/mkicon` 画一份多档
+  `.ico`、`windres` 编成 COFF 落到 `gui/rsrc_windows_amd64.syso`（`.syso` 必须和包同目录
+  才认）再编，编完删掉。`mkicon` 的输出来看扩展名：`.png` 出 1024 那一档给 macOS/Linux，
+  `.ico` 出 16~256 一整组给 Windows，两边画的是同一份 `render()`——改几何要一起对。
+  别指望 `go build -overlay`：它能在目录列举里看见新加的 `.syso`，但交给链接器的还是原路径。
 
 ## 约定
 
