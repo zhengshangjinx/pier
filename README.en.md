@@ -57,10 +57,36 @@ process group.
   health waits are interrupted. An interrupted start never writes its state back.
 - Services start in their own session (`setsid`), and the log file descriptor is inherited by the
   child — **quitting Pier never takes running services down**.
+- Services can declare `depends_on` and `restart`: start follows the dependency order, stop reverses
+  it, and a dependency cycle is reported while loading the manifest instead of being left to the
+  sort; `restart: on-failure` means "it disappeared without going through Stop, so bring it back",
+  capped at three times in ten minutes, with the panel saying how many restarts there have been.
 - "Who holds this port" is resolved by **process group**, not by PID alone: the port is usually
   held by a child process, and comparing PIDs alone points at the wrong thing.
 - Resource usage counts only Pier and the services it started (summed per process group), never the
   whole machine.
+
+### Ports and origin
+
+- `pier ports` lists what is listening right now: who opened each port, in which directory, and
+  whether the manifest already claims it. The one the manifest does not know about can be adopted
+  in one step — building the service from the running process beats retyping it from memory.
+- "Who holds this port" walks the parent chain to report the **origin**: which editor, which
+  terminal, or the Pier panel itself. When it cannot tell, it leaves the line empty rather than
+  pointing somewhere wrong.
+- Picking a port shows the free ones and the occupied ones side by side — whether a port is taken
+  is only knowable at start time, so both lists need to be visible while choosing.
+
+### Local HTTP API
+
+- `pier api` serves an HTTP API on `127.0.0.1:7717`: read state, start and stop services, read logs,
+  with an OpenAPI 3.1 document at `GET /openapi.json` so other tools can drive it. Print the token
+  with `pier api --show-token`, replace it with `--rotate`.
+- Two constraints are hard: it **binds to loopback only** (the API starts and stops processes;
+  binding `0.0.0.0` would hand "what runs on this machine" to the whole LAN), and **every API call
+  needs the token** — not to stop local users (they would just run `pier down`), but to stop any web
+  page you happen to have open: its JS can reach `127.0.0.1`, but a cross-origin request with a
+  custom header needs a preflight, and this server never answers CORS.
 
 ### Toolchains
 
@@ -210,10 +236,12 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier down [service...]` | Stop services |
 | `pier restart [service...]` | Restart services |
 | `pier status` | List every service and its state |
+| `pier ports` | List what is listening on this machine, who started it, and from which directory |
 | `pier logs <service> [-f]` | Show a service's log, `-f` to follow |
 | `pier logs --size` | Show how much disk the logs take |
 | `pier logs --clean [service] [--all]` | Remove logs older than 14 days; `--all` clears everything |
 | `pier ui` | Open the interactive terminal panel |
+| `pier api` | Serve a loopback-only HTTP API (`--show-token` / `--rotate` / `--port N`) |
 
 Every subcommand accepts `--config <manifest>` to use a YAML manifest instead (read-only).
 
@@ -240,6 +268,8 @@ services:
     script: dev              # package.json script, default "dev"
     port: 5173
     group: frontend
+    depends_on: [api]        # api starts first, and stops last
+    restart: on-failure      # bring it back when it disappears without going through Stop
 ```
 
 | Field | Meaning |
@@ -256,6 +286,8 @@ services:
 | `health` | Readiness probe URL. It is a **readiness signal, not a verdict**: a service that never answers it is still running, and the state falls back with an explanation once the probe times out |
 | `env` | Extra environment variables |
 | `toolchain` | Per-service toolchain override, taking precedence over the top level |
+| `depends_on` | Services that must start first (a list). Ordering only, never a verdict: a service still starts when its dependency failed |
+| `restart` | Takes one value, `on-failure`: bring the process back when it disappears without going through Stop. Empty means no automatic restart |
 
 Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=true -Djib.skip=true`
 — local runs don't build images.
@@ -267,6 +299,7 @@ Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=
 ├── services.json   services and groups (what the GUI edits)
 ├── settings.json   UI preferences, manually added SDKs, global defaults
 ├── state.json      process state (PID / PGID) used to reclaim services
+├── restart.lock    exclusive lock for the auto-restart sweep, so only one host sweeps
 ├── logs/<service>/<date>.log
 └── cache/bin/      hard links used to name Node processes
 ```
