@@ -21,7 +21,9 @@
     tools/shoot/shoot.py 输出.png 宽 高 [弹窗种类] [弹窗参数] [主题]
 
 弹窗种类见 gui/app.js 里 window.__pierDemo.open 的分支：
-    log / occupant / add / edit / portPicker / groupNew / groupRename / delete
+    log / occupant / add / edit / portPicker / scan（扫本机端口）
+    / adopt <端口>（从扫描结果里收一条：预演 + 填表，端口留空按演示数据里那个）
+    / groupNew / groupRename / delete
     / select <分组> / logsPage / sdk
     / filter <关键词> / quick <all|running|attention>（页头那行搜索与筛选）
     / readonly <来源>（只读清单：页头说明位、收起的编辑入口与拖动）

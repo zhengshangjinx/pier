@@ -72,6 +72,14 @@ type ServiceOut struct {
 	Toolchain map[string]string `json:"toolchain"`
 	// Runtimes 是启动时实际会用的 SDK 与选择依据，和真正启动走的是同一份解析结果。
 	Runtimes []proc.ToolInfo `json:"runtimes"`
+	// DependsOn 是启动顺序上的前置服务名，Restart 是重启策略，原样回传供编辑表单预填。
+	DependsOn []string `json:"dependsOn"`
+	Restart   string   `json:"restart"`
+	// RestartNote 说明这个服务最近被自动重启过几次，没发生过则为空。
+	//
+	// 有它才看得出「它自己崩过又起来了」：不然界面只显示一个正常的「运行中」，
+	// 而日志里那几段崩溃的痕迹没有任何东西解释。
+	RestartNote string `json:"restartNote"`
 	// Editable 为真表示这条定义在 Pier 自己的数据文件里，界面能改也能删；
 	// 命令行指定 YAML 清单时为假，那份文件 Pier 不改写。
 	Editable bool `json:"editable"`
@@ -253,6 +261,9 @@ func (p *Panel) State() StateOut {
 			Env:          svc.Env,
 			Toolchain:    svc.Toolchain,
 			Runtimes:     runtimesOf(sup, svc),
+			DependsOn:    svc.DependsOn,
+			Restart:      svc.Restart,
+			RestartNote:  p.restartNote(svc.Name),
 			Editable:     cfg.IsStore(),
 			Occupant:     st.Occupant,
 		}

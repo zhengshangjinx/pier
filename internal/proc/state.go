@@ -176,6 +176,12 @@ func RunningNames(path string) (map[string]bool, error) {
 	return out, nil
 }
 
+// EntryAlive 判断这条记录对应的进程是否还在，也就是状态里的「在跑」。
+//
+// 与 Status、ManagedName、RunningNames 是同一条判定，不另写一份：
+// 「还是不是当初那个进程」这件事上，多一份实现就是多一个会走样的口径。
+func EntryAlive(e *Entry) bool { return sameEntry(e) }
+
 // Prune 清理其中进程已不存在的记录，返回被清理的服务名。
 // 服务崩溃或被人手工 kill 后，状态文件不会自动更新，读到时才顺手清理。
 func (s *State) Prune() []string {

@@ -47,6 +47,9 @@
     moveGroups: window.pierMoveGroups,
     pickDirectory: window.pierPickDirectory,
     portCandidates: window.pierPortCandidates,
+    // 扫本机在听的端口，把其中一条收进清单
+    portScan: window.pierPortScan,
+    adoptPort: window.pierAdoptPort,
     createGroup: window.pierCreateGroup,
     renameGroup: window.pierRenameGroup,
     deleteGroup: window.pierDeleteGroup,
@@ -206,6 +209,11 @@
   var demoReadOnly = false;
   var demoReadOnlySrc = "";
 
+  // 演示数据里「清单已经写掉的那几个端口」，就是 demoState 里那八个服务声明的。
+  // 写一份共用的：后端那边 `Existing` 处处都是 cfg.UsedPorts()，同一屏数据里两份
+  // 清单若是各写各的，迟早一份多一个少一个，而看的人只会去信其中一份。
+  var DEMO_EXISTING = [47811, 47812, 47813, 47821, 47822, 47823, 47831, 47832];
+
   function demoState() {
     var mk = function (o) {
       return Object.assign({
@@ -223,6 +231,8 @@
         // 自相矛盾的画面（顶上写着「只读不写」，每一行却还挂着「编辑这个应用」）。
         editable: !demoReadOnly,
         occupant: null, op: "", opErr: "", opKind: "", toolchain: null,
+        // 依赖与重启：默认没有前置、不自动重启，需要演的那几条各自覆盖。
+        dependsOn: [], restart: "", restartNote: "",
         runtimes: [DEMO_GO],
         usage: { cpu: 0, memBytes: 0, procs: 0 }
       }, o);
@@ -266,6 +276,10 @@
         mk({ name: "demo-app", port: 47812, statusKey: "starting", statusText: "启动中",
           pid: 48220, uptime: "8s", op: "等待就绪", opKind: "start", running: true, portOpen: true,
           health: "http://localhost:47812/app/health", hasHealth: true,
+          // 这一条同时演「有前置」和「崩过、被拉起来了」：说明位那句是照
+          // internal/panel 的 restartNote 原样写的，界面上不另拼一份。
+          dependsOn: ["demo-admin"], restart: "on-failure",
+          restartNote: "进程退出后已自动重启 1 次",
           note: "尚未通过健康探针",
           usage: { cpu: 1.2, memBytes: 134217728, procs: 2 } }),
         mk({ name: "demo-web", kind: "node", port: 47813, statusKey: "external",
@@ -289,6 +303,10 @@
         mk({ name: "shop-web", kind: "node", port: 47823, group: "示例服务",
           statusKey: "stale", statusText: "已退出", portOpen: true, stale: true,
           runtimes: [DEMO_NODE],
+          // 崩了几次、额度也用完了的样子。这一句是界面上唯一能看出「它不会
+          // 自己再起来了」的地方，只有真跑过一次崩循环才见过，摆一份出来。
+          restart: "on-failure",
+          restartNote: "进程退出后已自动重启 3 次，已达上限（10 分钟 3 次），暂停自动重启",
           opErr: "服务 shop-web 编译失败，详见 /Users/you/.pier/logs/shop-web/2026-10-01.log",
           occupant: { port: 47823, pid: 9310, command: "node", user: "you" } }),
         // 这一条专演「探针没探通、服务照跑」：状态是「运行中」（不是永远挂在
@@ -307,6 +325,74 @@
           runtimes: [DEMO_PY] })
       ]
     };
+  }
+
+  // 演示用的端口扫描结果。四种样子各摆一条：Pier 正跑着的、清单里已经有位置的
+  // （目录对得上）、能收进来的、以及查不到工作目录的。
+  //
+  // 端口号沿用 demoState 里那几个，别处（端口候选、占用详情）用的也是它们——
+  // 同一屏数据里 47813 一会儿是这个一会儿是那个，核对的人只会去查后端。
+  function demoPortScan() {
+    return { ok: true, msg: "", ports: [
+      { port: 47811, pid: 48213, command: "demo-admin", user: "you",
+        dir: "/Users/you/workspace/demo-admin", dirShort: "~/workspace/demo-admin",
+        service: "demo-admin", managed: true, known: "",
+        origin: { kind: "panel", label: "Pier 面板", chain: ["Pier 面板"] } },
+      { port: 47812, pid: 48220, command: "demo-app", user: "you",
+        dir: "/Users/you/workspace/demo-app", dirShort: "~/workspace/demo-app",
+        service: "demo-app", managed: true, known: "",
+        origin: { kind: "panel", label: "Pier 面板", chain: ["Pier 面板"] } },
+      // 清单里有 demo-web、此刻开着它的却是别人：managed 为假而 known 有值，
+      // 这一行不给「纳管」——收了就是第二条抢同一个端口的服务。
+      { port: 47813, pid: 8142, command: "node", user: "you",
+        dir: "/Users/you/workspace/demo-web", dirShort: "~/workspace/demo-web",
+        service: "", managed: false, known: "demo-web",
+        origin: { kind: "terminal", label: "iTerm", chain: ["npm", "iTerm"] } },
+      { port: 47822, pid: 51007, command: "java", user: "you",
+        dir: "/Users/you/workspace/shop/shop-app", dirShort: "~/workspace/shop/shop-app",
+        service: "shop-app", managed: true, known: "",
+        origin: { kind: "panel", label: "Pier 面板", chain: ["Pier 面板"] } },
+      { port: 47823, pid: 9310, command: "node", user: "you",
+        dir: "/Users/you/workspace/shop/shop-web", dirShort: "~/workspace/shop/shop-web",
+        service: "", managed: false, known: "shop-web",
+        origin: { kind: "editor", label: "VS Code", chain: ["VS Code"] } },
+      { port: 47831, pid: 67214, command: "python3", user: "you",
+        dir: "/Users/you/workspace/shop/mock-payment", dirShort: "~/workspace/shop/mock-payment",
+        service: "mock-payment", managed: true, known: "",
+        origin: { kind: "panel", label: "Pier 面板", chain: ["Pier 面板"] } },
+      // 这一条是这一屏存在的理由：清单里没有、目录也没人认领，而它正听着端口。
+      { port: 47840, pid: 55501, command: "node", user: "you",
+        dir: "/Users/you/workspace/shop/simulator-payment", dirShort: "~/workspace/shop/simulator-payment",
+        service: "", managed: false, known: "",
+        origin: { kind: "editor", label: "VS Code", chain: ["VS Code"] } },
+      // 认不出来的一条（既没有宿主、也读不到工作目录）。
+      { port: 47855, pid: 612, command: "postgres", user: "postgres",
+        dir: "", dirShort: "", service: "", managed: false, known: "" }
+    ] };
+  }
+
+  // 演示用的端口候选。三份名单必须互相对得上：used 是清单里写掉、此刻没人听的，
+  // taken 是此刻正被监听的——后端先看监听再看清单，同一个号只会进其中一份，
+  // 而 free 更不能与它们重叠。三份各写各的时候，47813 既是这张卡上的可用按钮，
+  // 又是旁边那张卡上的「清单已用」，两张表并排摆着一眼就看出是假的。
+  //
+  // used 从 DEMO_EXISTING 里减掉 taken 得来，不另写一份；taken 就是 demoPortScan
+  // 里正听着端口的那几个（含 47813、47823 这两个别人占着的），多一个 47840：
+  // 它是「清单里没有、正被占着」那一条，在这一屏里正好该出现在已占用的名单上。
+  //
+  // 停法也照后端：凑够 48 个可用的就收工，所以 scanTo 是最后一个真看过的号，
+  // 不是「本来打算看到哪儿」——那个上界会让界面说出一段没查过的范围。
+  var DEMO_TAKEN = [47811, 47812, 47813, 47822, 47823, 47831, 47840];
+
+  function demoPortCandidates() {
+    var used = DEMO_EXISTING.filter(function (p) { return DEMO_TAKEN.indexOf(p) < 0; });
+    var free = [];
+    for (var p = 47800; free.length < 48; p++) {
+      if (used.indexOf(p) < 0 && DEMO_TAKEN.indexOf(p) < 0) { free.push(p); }
+    }
+    return { ok: true, from: 47800, free: free, used: used, taken: DEMO_TAKEN,
+      scanTo: free[free.length - 1],
+      hints: { "47800": "通用 HTTP 备用端口", "47808": "通用备用端口" } };
   }
 
   async function demoCall(name, args) {
@@ -336,23 +422,40 @@
         return { ok: true, service: args[0], port: 47813,
           owner: { pid: 8142, uid: 501, user: "you", command: "node",
             args: "node /Users/you/workspace/demo/node_modules/.bin/vite --port 47813",
-            started: "Mon Sep 29 00:12:33 2026", managed: false, service: "" } };
+            started: "Mon Sep 29 00:12:33 2026", managed: false, service: "",
+            // 认出来的宿主连着写：近的在前。摆一条编辑器起的，正好是「该去编辑器里
+            // 关它，而不是在这里结束进程」那种情况。
+            origin: { kind: "editor", label: "VS Code", chain: ["VS Code"] } } };
+      case "portScan":
+        return demoPortScan();
+      case "adoptPort":
+        // 读不到工作目录的那一条（47855）照真正的后端那样回一句失败：
+        // 演示数据里留着它，是为了这条失败路径也能在界面上看一遍。
+        if (parseInt(args[0], 10) === 47855) {
+          return { ok: false,
+            msg: "查不到 PID 612 的工作目录（可能是别的用户的进程，或者它已经不在了），请手动填写项目目录" };
+        }
+        return { ok: true, absPath: "/Users/you/workspace/shop/simulator-payment",
+          relPath: "shop/simulator-payment", found: ["package.json"], kind: "node",
+          plan: "npm run dev（package.json 的 dev 脚本）",
+          existing: DEMO_EXISTING,
+          suggestPort: parseInt(args[0], 10) || 47840, portFrom: "正在监听的端口",
+          health: "http://localhost:" + (parseInt(args[0], 10) || 47840) + "/",
+          suggestName: "simulator-payment",
+          names: demoState().services.map(function (s) { return s.name; }),
+          groups: ["示例后端", "示例服务", "模拟服务"],
+          adopted: "PID 55501（node）" };
       case "inspectDir":
         return { ok: true, absPath: args[0], relPath: "shop/simulator-payment",
           found: ["package.json"], kind: "node",
           plan: "npm run dev（package.json 的 dev 脚本）",
-          existing: [47811, 47812, 47813, 47821, 47822, 47823, 47831, 47832],
+          existing: DEMO_EXISTING,
           suggestPort: 5173, portFrom: ".env 的 VITE_PORT",
           health: "http://localhost:5173/", suggestName: "simulator-payment",
           names: demoState().services.map(function (s) { return s.name; }),
           groups: ["示例后端", "示例服务", "模拟服务"] };
       case "portCandidates":
-        return { ok: true, from: 47800,
-          free: Array.from({ length: 48 }, function (_, i) { return 47800 + i; })
-            .filter(function (p) { return [47831, 47832].indexOf(p) < 0; }),
-          used: [47811, 47812, 47813, 47821, 47822, 47823, 47831, 47832],
-          taken: [47813, 47823, 47831, 47832], scanTo: 47900,
-          hints: { "47800": "通用 HTTP 备用端口", "5173": "Vite 默认", "47808": "通用备用端口" } };
+        return demoPortCandidates();
       case "pickDirectory":
         return { ok: true, dir: "/Users/you/workspace/shop/simulator-payment",
           rel: "shop/simulator-payment" };
@@ -1202,6 +1305,10 @@
       var holder = s.occupant.service || s.occupant.command;
       bits.push({ t: "被 " + [holder, "PID " + s.occupant.pid].filter(Boolean).join(" · ") + " 占用" });
     }
+    // 自动重启过就要说出来。一个崩了又被拉起来的服务，在界面上和「一直好好跑着」
+    // 长得一模一样，而这两件事要看的程度差得远；到顶之后「不救了」更是只能从
+    // 这一句里看出来。措辞由后端的 restartNote 给，这里不另写一份。
+    if (hasVal(s.restartNote)) bits.push({ t: s.restartNote, warn: true });
     if (hasVal(s.userNote)) bits.push({ t: s.userNote });
     else if (hasVal(s.note) && !waitingHealth) bits.push({ t: s.note, warn: !!s.probeExpired });
 
@@ -1387,12 +1494,24 @@
       }
     }
 
+    // 「谁把它拉起来的」。链上认出来的那几个从近到远连着写（近的在前），
+    // 与命令行 `pier ports` 那一列是同一个说法。这一行直接决定下一步该做什么：
+    // 自己刚在编辑器里起的，去编辑器里关；别人起的才轮到下面那颗「结束进程」。
+    //
+    // 认不出来时不留空行：摆一句「认不出来」，它说的是「这条链路上没有认得出的
+    // 宿主」——那是个真答案，和「这一栏没查」不是一回事。
+    var originText = "认不出来";
+    if (owner && owner.origin && (owner.origin.chain || []).length) {
+      originText = owner.origin.chain.join(" ← ");
+    }
+
     var rows = [];
     if (owner && !broken) {
       rows = [
         { key: "port", label: "端口", children: String(pick(poData, "port")) },
         { key: "cmd", label: "进程名", children: pick(owner, "command") },
         { key: "pid", label: "PID", children: String(owner.pid) },
+        { key: "origin", label: "启动来源", children: originText },
         { key: "user", label: "属主", children: pick(owner, "user") },
         { key: "start", label: "启动于", children: pick(owner, "started") },
         { key: "args", label: "命令行", children: html`<${A.Typography.Text} code
@@ -1414,9 +1533,122 @@
         : html`<${A.Alert} type="warning" showIcon style=${{ marginBottom: 14 }}
           message="结束进程是不可撤销的"
           description="请先确认下面这个进程确实是要清掉的那个。如果它是你在另一个终端里正调试的服务，结束它会让那边的会话中断。"/>`}
+        ${"" /* 标签列宽度要装得下最长的那一条（「启动来源」四个字）。antd 给标签格
+                左右各留 24px，剩下的才是文字的：92 只够三个字，第四个会折到下一行，
+                一列里独独那一格变成两行高。 */}
         <${A.Descriptions} column=${1} bordered
-          styles=${{ label: { width: 92 } }} items=${rows}/>
+          styles=${{ label: { width: 112 } }} items=${rows}/>
       <//>` : null}
+    <//>`;
+  }
+
+  // ── 扫描本机端口 ─────────────────────────────────────────────────────────
+
+  // 这一屏回答「本机此刻开着哪些端口、各自是谁」，用处是把已经在跑、清单里
+  // 却没有的那个服务收进来。那种情况下用户手上只有一条命令行，而清单要的是
+  // 目录、类型、启动命令、端口四样——这四样恰好都能从那个进程身上问出来。
+  //
+  // 「纳管」不在这一屏写清单：后端那一步只做一次预演（不落盘），把结果当作
+  // 表单的预填值交出去，用户看一眼、改一改、点了保存才算数。从目录推出来的
+  // 东西只对「一个目录一个服务」的项目成立，直接落盘的话，monorepo 里收进来的
+  // 那一条名字和命令都是猜的，而删一条错的服务比在表单里改一遍麻烦。
+  function PortScanModal(props) {
+    var open = props.open, onClose = props.onClose;
+    // 变量名 scan 与 sp 是 TestUIFieldNamesExistInBackend 的索引：前者对应
+    // manage.PortScanOut，后者是里面的每一条 manage.ScannedPort。换成 data
+    // 之类的通用名，这一屏读的字段就再也核对不出来了。
+    var ss = React.useState(null), scan = ss[0], setScan = ss[1];
+    var ls = React.useState(false), loading = ls[0], setLoading = ls[1];
+    var es = React.useState(""), err = es[0], setErr = es[1];
+    var bs = React.useState(""), busy = bs[0], setBusy = bs[1];
+    var token = A.theme.useToken().token;
+    var sm = { fontSize: token.fontSizeSM, color: token.colorTextTertiary };
+
+    var load = function () {
+      setLoading(true); setErr("");
+      return call("portScan").then(function (r) {
+        setScan(r); setLoading(false);
+      }).catch(function (ex) {
+        setScan(null); setErr(ex.message); setLoading(false);
+      });
+    };
+    React.useEffect(function () { if (open) load(); }, [open]);
+
+    // 纳管：后端重新看一眼这个端口上此刻是谁，照它的目录走一遍识别，再把那份
+    // 预填值交给表单。重查一次是必要的——这一屏可能已经摆了几十秒，这期间进程
+    // 完全可能退出、端口被另一个人接走。
+    var adopt = async function (sp) {
+      setBusy(String(sp.port));
+      try {
+        var info = await call("adoptPort", String(sp.port), "");
+        setBusy("");
+        onClose();
+        props.onAdopt(info, sp);
+      } catch (ex) {
+        setBusy("");
+        props.message.error(ex.message);
+      }
+    };
+
+    var ports = (scan && scan.ports) || [];
+    // 一条都没有不等于「本机什么都没开」：读不到监听表时后端只回一句话（msg），
+    // 把那种情况渲染成一个空列表，读到的会是一个与事实相反的结论。
+    var emptyText = scan ? (scan.msg || "本机没有正在监听的 TCP 端口") : "";
+
+    // 一个端口该不该收，看的是它此刻归谁：Pier 正在跑的服务本来就在清单里，
+    // 目录和某条服务对得上的也已经有主了（多半是同名不同实例）。这两种都不给
+    // 「纳管」，否则会多出一条和原来那条抢同一个端口的服务。
+    var footer = [
+      html`<${A.Button} key="r" icon=${e(IconRefresh)} loading=${loading}
+        onClick=${load}>重新扫描<//>`,
+      html`<${A.Button} key="c" type="primary" onClick=${onClose}>关闭<//>`
+    ];
+
+    return html`<${A.Modal} open=${open} onCancel=${onClose} footer=${footer}
+      width=${SIZE.modalScan} styles=${{ body: BODY_SCROLL }}
+      title="扫描本机端口">
+      ${"" /* 这一屏列的是「正在监听」的 TCP 端口，来源是系统自己的监听表；
+             每一行后面那几样（目录、来源、是不是 Pier 起的）都是额外查出来的，
+             查不到就直说查不到，不拿空值凑数——一个空的目录列会让人以为
+             那个进程没有工作目录。 */}
+      ${err ? html`<${A.Alert} type="error" showIcon className="dc-hidden-bar"
+        message="扫描失败" description=${err}/>` : null}
+      ${loading && !scan ? html`<${A.Skeleton} active paragraph=${{ rows: 5 }}/>` : null}
+      ${scan && !ports.length ? html`<${A.Empty} className="dc-empty"
+        description=${emptyText}/>` : null}
+      ${ports.length ? html`<div className="dc-list">
+        ${ports.map(function (sp) {
+          var tag = sp.managed ? "Pier 服务：" + sp.service
+            : (sp.known ? "清单里已有：" + sp.known : "");
+          var origin = sp.origin && (sp.origin.chain || []).length
+            ? sp.origin.chain.join(" ← ") : "认不出来";
+          return html`<div className="dc-row dc-scan-row" key=${sp.port}>
+            <div className="dc-row-text">
+              <div className="dc-row-title">
+                <span className="dc-mono dc-port">:${sp.port}</span>
+                <span className="dc-row-name">${sp.command || "未知进程"}</span>
+                <span className="dc-kind" style=${{ fontSize: token.fontSizeSM,
+                  color: token.colorTextSecondary, background: token.colorFillTertiary }}>
+                  ${"PID " + sp.pid}</span>
+                ${tag ? html`<span className="dc-kind" style=${{ fontSize: token.fontSizeSM,
+                  color: token.colorPrimary, background: token.colorPrimaryBg }}>
+                  ${tag}</span>` : null}
+              </div>
+              <div className="dc-row-sub" style=${sm}>
+                <span className="dc-mono" title=${sp.dir || ""}>
+                  ${sp.dirShort || sp.dir || "查不到工作目录"}</span>
+              </div>
+              <div className="dc-row-sub" style=${sm}>${"启动来源：" + origin}</div>
+            </div>
+            <div className="dc-row-actions">
+              ${sp.managed || sp.known ? null : html`<${A.Button}
+                color="primary" variant="filled"
+                loading=${busy === String(sp.port)}
+                onClick=${function () { adopt(sp); }}>纳管<//>`}
+            </div>
+          </div>`;
+        })}
+      </div>` : null}
     <//>`;
   }
 
@@ -1436,6 +1668,10 @@
       setLoading(true);
       call("portCandidates", String(start || 8080)).then(function (r) {
         setData(r); setLoading(false);
+        // 输入框改成后端真正用的那个起点：填进来的数它不一定收（0、70000 这些
+        // 都会被退回 8080），而下面那句「只看了 X–Y 这一段」说的是它查过的范围。
+        // 两边各说各的，输入框里就留着一个从没查过的数。
+        if (r && r.from) setFrom(String(r.from));
       }).catch(function (ex) {
         props.message.error(ex.message); setLoading(false);
       });
@@ -1469,32 +1705,45 @@
           <${A.Button} onClick=${function () { load(from); }}>查找<//>
         <//>
         <${A.Alert} type="info" showIcon
-          message=${"下面这些端口此刻都没有进程监听，清单里也还没用到（扫描到 " +
-            ((cand && cand.scanTo) || "—") + "）。端口有没有被别的项目占着，只有启动时才知道，所以这只是个起点。"}/>
-        ${loading ? html`<${A.Skeleton} active paragraph=${{ rows: 5 }}/>` : html`
-          <${A.Space} size=${[8, 8]} wrap align="start">
-            ${free.map(function (p) { return html`<${A.Button} key=${p}
-              type=${picked === p ? "primary" : "default"}
-              onClick=${function () { setPicked(p); }}
-              style=${{ height: "auto", padding: "4px 12px", textAlign: "center" }}>
-              <span style=${{ display: "block", fontWeight: 600 }}>${p}</span>
-              ${hints[String(p)] ? html`<span
-                style=${{ display: "block", fontSize: token.fontSizeSM, opacity: .65 }}>${hints[String(p)]}</span>` : null}
-            <//>`; })}
-          <//>`}
-        ${cand && ((cand.used || []).length || (cand.taken || []).length) ? html`
-          <${A.Collapse} ghost items=${[{
-            key: "t", label: "这段范围里已被占用的端口（" +
-              ((cand.used || []).length + (cand.taken || []).length) + " 个）",
-            children: html`<${A.Space} size=${[4, 4]} wrap>
+          message=${"只看了 " + ((cand && cand.from) || "—") + "–" + ((cand && cand.scanTo) || "—") +
+            " 这一段。端口会不会被别的项目占着，只有启动的时候才知道，所以「可以用的」也只是个起点。"}/>
+        ${loading ? html`<${A.Skeleton} active paragraph=${{ rows: 5 }}/>` : (!cand ? null : html`<${React.Fragment}>
+          ${"" /* 两张表并排摆着、各带一个标题，而不是把「已被占用」收进折叠面板里：
+                  挑端口时要同时看见这两边，才知道手上这个号是不是别人已经占了。
+                  收起来的那一组看着像可看可不看的补充说明，而它是同一件事的另一半。 */}
+          <section className="dc-card dc-pick-card">
+            <div className="dc-card-head">
+              <span className="dc-card-title">可以用的端口</span>
+              <span className="dc-card-sub">此刻没有进程监听，清单里也还没用到</span>
+            </div>
+            <${A.Space} size=${[8, 8]} wrap align="start">
+              ${free.map(function (p) { return html`<${A.Button} key=${p}
+                type=${picked === p ? "primary" : "default"}
+                onClick=${function () { setPicked(p); }}
+                style=${{ height: "auto", padding: "4px 12px", textAlign: "center" }}>
+                <span style=${{ display: "block", fontWeight: 600 }}>${p}</span>
+                ${hints[String(p)] ? html`<span
+                  style=${{ display: "block", fontSize: token.fontSizeSM, opacity: .65 }}>${hints[String(p)]}</span>` : null}
+              <//>`; })}
+              ${free.length ? null : html`<span style=${{ color: token.colorTextTertiary }}>
+                这一段里没有可以用的端口，把起点往后挪一挪再找。<//>`}
+            <//>
+          </section>
+          ${((cand.used || []).length || (cand.taken || []).length) ? html`<section className="dc-card dc-pick-card">
+            <div className="dc-card-head">
+              <span className="dc-card-title">已被占用的端口</span>
+              <span className="dc-card-sub">清单里已经写掉的，和此刻正被别人占着的</span>
+            </div>
+            <${A.Space} size=${[4, 4]} wrap>
               ${(cand.used || []).map(function (p) {
                 return html`<${A.Tag} key=${"u" + p} color="orange">${p} 清单已用<//>`;
               })}
               ${(cand.taken || []).map(function (p) {
                 return html`<${A.Tag} key=${"t" + p}>${p} 已被占用<//>`;
               })}
-            <//>`
-          }]}/>` : null}
+            <//>
+          </section>` : null}
+        <//>`)}
       <//>
     <//>`;
   }
@@ -1513,9 +1762,11 @@
 
   // 下拉框（分组、类型）的空值用 undefined 而不是空串：空串会被当成「选中了一个空选项」，
   // 占位文字「未分组」「自动识别」就不显示了，看着像控件坏了。
+  // dependsOn 用 [] 而不是 undefined：多选下拉的空值就是空数组。
   var EMPTY_FORM = {
     name: "", dir: "", group: undefined, kind: undefined, run: "", build: "",
-    module: "", script: "", port: null, health: "", note: "", env: ""
+    module: "", script: "", port: null, health: "", note: "", env: "",
+    dependsOn: [], restart: undefined
   };
 
   // 环境变量在表单里是多行文本（一行一个 KEY=VALUE），存的时候是对象。
@@ -1583,8 +1834,8 @@
   // vw 那一段负责跟着窗口长，px 那一段是上限：表单的行宽超过 ~1000px
   // 之后标签和输入框离得太远，扫视很累，全屏时铺满整个窗口并不好读。
   //
-  // 宽度归这里一处管，是因为这六个值之间是有相对关系的
-  // （详情 < 挑选 < 表单，抽屉最宽），散在六个组件里改一个就失去平衡。
+  // 宽度归这里一处管，是因为这七个值之间是有相对关系的
+  // （详情 < 挑选 = 扫描 < 表单，抽屉最宽），散在七个组件里改一个就失去平衡。
   var SIZE = {
     // 只问一句话的：新建/重命名分组、删除确认。
     modalNarrow: "min(460px, 44vw)",
@@ -1593,6 +1844,8 @@
     modalOwner: "min(760px, 62vw)",
     // 挑选空闲端口：一屏里尽量多列几个候选。
     modalPicker: "min(920px, 70vw)",
+    // 扫描本机端口：与「挑选」同样是几列文字加一颗按钮，宽度对齐它。
+    modalScan: "min(920px, 70vw)",
     // 添加/编辑应用：三行两列的表单，最宽的那个。
     modalForm: "min(1080px, 76vw)",
     // 日志抽屉：越宽一行能放下的日志越长，给到最大。
@@ -1663,15 +1916,44 @@
       // 钉住的 SDK 也跟着回填。不回填的话，编辑一个已经指定了 JDK 的服务时
       // 下拉会显示成空的，看着像「没钉」，一保存就真把它删了。
       setTc(Object.assign({}, (editing && editing.toolchain) || {}));
+      if (props.adopt) {
+        // 从「扫描本机端口」收进来的那一条：目录、名字、类型、健康地址全由后端
+        // 照那个进程推好了，这里照填。端口直接抄它此刻正在听的那个——纳管的
+        // 意思就是「照它现在的样子记下来」，另挑一个端口收进来就没有意义了。
+        //
+        // 走的是与手动填目录完全相同的一次识别（见 manage.AdoptPort），所以
+        // info 里那份说明和「填了目录之后」看到的一模一样，不必另写一套。
+        var d = props.adopt.info || {};
+        namesRef.current = d.names || [];
+        setInfo(d);
+        form.setFieldsValue(Object.assign({}, EMPTY_FORM, {
+          dir: d.relPath || d.absPath || "", name: d.suggestName || "",
+          kind: d.kind || undefined, port: props.adopt.port || d.suggestPort || null,
+          health: d.health || ""
+        }));
+        // 「它此刻还在跑」必须说在明处：这个端口现在握着的是那个老进程，
+        // 保存只是把它记进清单，要等 Pier 真的把它拉起来才会换人。不说的话，
+        // 用户会以为点了保存就已经接管了。
+        if (d.adopted) {
+          props.message.info("已照 " + d.adopted + " 填好，它此刻还在跑；" +
+            "保存后先停掉它，再在这里启动，才由 Pier 接管。");
+        }
+        return;
+      }
       // 编辑时用后端回传的原值预填，包括用户手写的 run/build/module/script——
       // 不回填的话，保存一次就会把这些字段悄悄清空。
       form.setFieldsValue(editing ? {
         name: editing.name, dir: editing.dir, group: editing.group || undefined, kind: editing.kind || undefined,
         run: editing.run, build: editing.build, module: editing.module, script: editing.script,
         port: editing.port > 0 ? editing.port : null, health: editing.health, note: editing.userNote,
-        env: envToText(editing.env)
+        env: envToText(editing.env),
+        // 依赖与重启也要回填。不回填的话，编辑一个配了前置的服务时那两个下拉是空的，
+        // 看着像「没配」，一保存就真把它清掉了——和上面那几栏是同一个坑。
+        dependsOn: editing.dependsOn || [], restart: editing.restart || undefined
       } : Object.assign({}, EMPTY_FORM, { group: props.defaultGroup || undefined }));
-    }, [open, editing]);
+      // 依赖项只认端口号这个数。写成整个 adopt 对象的话，上层每 2 秒刷一次状态都会
+      // 换一个新对象，这一处预填就会跟着重跑一遍——用户刚改好的那几栏会被抹回原样。
+    }, [open, editing, props.adopt ? props.adopt.port : 0]);
 
     // ── 「将使用 X，依据 Y」的那次预演 ───────────────────────────────────────
     //
@@ -1828,6 +2110,9 @@
         var r = await call("saveService", JSON.stringify(Object.assign({}, v, {
           port: v.port ? parseInt(v.port, 10) : 0,
           env: textToEnv(v.env), toolchain: pinsFor(),
+          // 这两栏每次都发全：空数组表示「没有前置」，空串表示「不自动重启」，
+          // 都是明确的意图，与「这次提交没带这一项」分得开（见 manage.ServiceIn）。
+          dependsOn: v.dependsOn || [], restart: v.restart || "",
           // 名称那一栏改了就叫一次改名。送的是「编辑前叫什么」，由后端把改名和
           // 覆盖保存放进同一次写盘：分两次发的话，中间任何一步失败都会留下
           // 名字和内容对不上的半截状态。
@@ -1920,11 +2205,12 @@
       okText=${editing ? "保存" : "添加"} cancelText="取消"
       confirmLoading=${saving} onOk=${submit}
       styles=${{ body: BODY_SCROLL }}>
-      ${"" /* 三张卡片自上而下：所有类型都有的基本信息 → 只对当前类型生效的专属设置 →
-             所有类型通用的高级设置。标签在左、统一四个字以内，排成一列对齐；
-             说明一律写成输入框里的灰色占位文字，不在每栏底下再挂一行。
-             短内容（名称、类型、分组、端口、子模块、JDK）两两一行，路径、地址、命令、备注各占一行。
-             不画必填星号：星号会把那一栏的标签挤歪，漏填时校验信息照样会出来。 */}
+      ${"" /* 四张卡片自上而下：所有类型都有的基本信息 → 只对当前类型生效的专属设置 →
+             跨服务的依赖与重启 → 所有类型通用的高级设置。标签在左、统一四个字以内，
+             排成一列对齐；说明一律写成输入框里的灰色占位文字，不在每栏底下再挂一行。
+             短内容（名称、类型、分组、端口、子模块、JDK、前置、重启）两两一行，
+             路径、地址、命令、备注各占一行。不画必填星号：星号会把那一栏的标签挤歪，
+             漏填时校验信息照样会出来。 */}
       <${A.Form} form=${form} layout="horizontal" className="dc-form" colon=${false}
         requiredMark=${false} labelAlign="left" labelCol=${{ flex: "0 0 68px" }}
         wrapperCol=${{ flex: "1 1 0", style: { minWidth: 0 } }}
@@ -2084,6 +2370,35 @@
           })}
 
           ${previewBlock()}
+        </section>
+
+        ${"" /* 跨服务的两件事：谁先起来、它自己退出之后要不要再拉起来。都不影响这个
+               服务怎么跑，但一个管「全部启动」的次序，一个管进程意外退出之后要不要
+               管——按类型分家的那张表放不下它们，塞进「高级设置」又会把那句
+               「留空按类型自动推断」的说明搅浑。 */}
+        <section className="dc-card">
+          <div className="dc-card-head">
+            <span className="dc-card-title">依赖与重启</span>
+            <span className="dc-card-sub">留空表示不依赖谁、退出后也不自动重启</span>
+          </div>
+          <${TwoCol}>
+            ${"" /* 只列清单里已有的服务，不给自由输入：写错一个名字的后果是这份清单
+                   直接加载不了（「依赖的 X 不在清单里」），而报错要等到下次启动才看得到。
+                   把自己排掉，是因为「依赖了自己」同样是一条加载不了的清单。 */}
+            <${A.Form.Item} name="dependsOn" label="前置服务">
+              <${A.Select} mode="multiple" allowClear showSearch
+                placeholder="它们先起来，本服务才轮到"
+                options=${(props.knownNames || []).filter(function (n) {
+                  return n !== (editing ? editing.name : "");
+                }).map(function (n) { return { value: n, label: n }; })}/>
+            <//>
+            ${"" /* 只有这一个可选值。Pier 不常驻，「总是重启」与「失败时重启」在这里
+                   没有差别，多摆一个只会让人琢磨它们差在哪。 */}
+            <${A.Form.Item} name="restart" label="退出之后">
+              <${A.Select} allowClear placeholder="不自动重启"
+                options=${[{ value: "on-failure", label: "失败时自动重启" }]}/>
+            <//>
+          <//>
         </section>
 
         <section className="dc-card">
@@ -2738,6 +3053,9 @@
     var lg = React.useState({ open: false, name: "" }), log = lg[0], setLog = lg[1];
     var po = React.useState({ open: false, name: "" }), portOwner = po[0], setPortOwner = po[1];
     var fm = React.useState({ open: false, editing: null }), form = fm[0], setForm = fm[1];
+    // 扫描本机端口：单独一个开关，不挂在 form 上——那一屏有自己的取数与重扫，
+    // 和表单的开合没有关系，混成一个状态只会让「关掉表单」顺手把扫描也关掉。
+    var sc = React.useState(false), scanOpen = sc[0], setScanOpen = sc[1];
     var del = React.useState({ open: false, svc: null }), delState = del[0], setDel = del[1];
     var gm = React.useState({ open: false, mode: "create", target: "" }), grp = gm[0], setGrp = gm[1];
     var nm = React.useState(""), navMenu = nm[0], setNavMenu = nm[1];
@@ -3226,6 +3544,15 @@
           else if (kind === "add") setForm({ open: true, editing: null });
           else if (kind === "edit") setForm({ open: true, editing: find(arg) });
           else if (kind === "portPicker") setForm({ open: true, editing: null, openPort: true });
+          // 从扫描结果里挑一条收进来：端口写死成演示数据里那个「能收进来的」，
+          // 走的是和点「纳管」完全相同的两步（预演 → 填表）。
+          else if (kind === "scan") setScanOpen(true);
+          else if (kind === "adopt") {
+            call("adoptPort", String(arg || 47840), "").then(function (info) {
+              setScanOpen(false);
+              setForm({ open: true, editing: null, adopt: { port: parseInt(arg, 10) || 47840, info: info } });
+            }).catch(function () {});
+          }
           else if (kind === "groupNew") setGrp({ open: true, mode: "create", target: "" });
           else if (kind === "groupRename") setGrp({ open: true, mode: "rename", target: arg || "示例后端" });
           else if (kind === "delete") {
@@ -3237,6 +3564,7 @@
             setForm({ open: false, editing: null });
             setGrp({ open: false, mode: "create", target: "" });
             setDel({ open: false, svc: null });
+            setScanOpen(false);
           } else if (kind === "select") {
             setSelected(arg || "all");
           } else if (kind === "filter") {
@@ -3594,9 +3922,16 @@
                     onClick=${function () { runBatch("stop", headBatch, headBatchLabel); }}>停止本组<//>
                 <//>`}
               <//>
-              ${readOnly ? null : html`<${A.Button} type="primary" icon=${e(IconPlus)}
-                title="⌘N"
-                onClick=${function () { setForm({ open: true, editing: null }); }}>添加应用<//>`}
+              ${"" /* 添加服务的两个入口并排：左手边那个是「它已经在跑了，照它现在的样子
+                     记下来」——手边有一个清单里没有的服务时，这条路上要的四样东西
+                     （目录、类型、启动命令、端口）那个进程身上都有，而「添加应用」得从
+                     填目录开始。两个按钮分开摆而不是收进一个下拉里：藏在箭头后面的话，
+                     只有已经知道有这条路的人找得到它。 */}
+              ${readOnly ? null : html`<${React.Fragment}>
+                <${A.Button} onClick=${function () { setScanOpen(true); }}>从端口添加<//>
+                <${A.Button} type="primary" icon=${e(IconPlus)} title="⌘N"
+                  onClick=${function () { setForm({ open: true, editing: null }); }}>添加应用<//>
+              <//>`}
             </div>`}
           </div>
           ${filterBar}
@@ -3700,7 +4035,16 @@
         onStopService=${function (n) { setPortOwner({ open: false, name: "" }); act("stop", { name: n }); }}
         onClose=${function () { setPortOwner({ open: false, name: "" }); }}/>
 
+      <${PortScanModal} open=${scanOpen} message=${msg.message}
+        onAdopt=${function (info, sp) {
+          // 扫描那一屏只是把那一行交过来，真正填表的是表单自己：从端口收进来和
+          // 手填目录走的是同一次识别，预填逻辑放在一处才不会两边说法不一。
+          setForm({ open: true, editing: null, adopt: { port: sp.port, info: info } });
+        }}
+        onClose=${function () { setScanOpen(false); }}/>
+
       <${ServiceFormModal} open=${form.open} editing=${form.editing} openPort=${form.openPort}
+        adopt=${form.adopt}
         groups=${groups} defaultGroup=${selected === "all" ? "" : selected}
         knownNames=${services.map(function (s) { return s.name; })}
         message=${msg.message}

@@ -559,6 +559,14 @@ body {
   .dc-row-inline { display: block; }
 }
 
+/* 扫出来的一行只有两列：左边三行文字（端口与进程、目录、来源），
+   右边一颗「纳管」。服务列表那两列（资源占用、端口）在这里没有对应的东西，
+   照抄会留出两大块空白。 */
+.dc-scan-row { grid-template-columns: minmax(0, 1fr) auto; }
+/* 「纳管」是文字按钮，不是「启动 / 停止」那类需要固定宽度的主操作，
+   不要 .dc-row-actions 给第一个按钮留的那 88px 起步宽度。 */
+.dc-scan-row .dc-row-actions > .ant-btn:first-child { min-width: 0; margin-right: 0; }
+
 .dc-empty { padding: 40px 0; }
 
 .dc-hidden-bar { margin-bottom: 16px; }
@@ -598,6 +606,11 @@ body {
 }
 
 .dc-card-alert { margin-bottom: 16px; }
+
+/* 端口挑选里的两张卡在 Space 里排，行距由 Space 给：卡片自己再留一份的话，
+   两张卡之间就是 24px，比弹窗里别处的行距宽出一倍。下内边距也要补回来——
+   表单里那几张卡底下压着的是表单项自己的边距，这两张卡底下是标签和按钮。 */
+.dc-pick-card { margin-bottom: 0; padding-bottom: 14px; }
 
 /* 「将使用 X，依据 Y」：表单里那几套 SDK 选完之后，把这次真正会用上的那一套
    写在下面，连同「凭什么挑中它」。

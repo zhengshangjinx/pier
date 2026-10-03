@@ -30,6 +30,16 @@ const DefaultConfigName = "pier.yaml"
 // DefaultScript 是 Node 服务未指定 script 时使用的 package.json 脚本名。
 const DefaultScript = "dev"
 
+// 重启策略。留空表示不自动重启，这也是默认：多数开发服务器退出就是用户想让它退出。
+const (
+	// RestartOnFailure 表示进程没经过「停止」就消失了，就把它再拉起来。
+	//
+	// 只有这一种取值。服务是 setsid 出去的独立进程，Pier 不 Wait 它（见 supervisor.go），
+	// 因而拿不到退出码——「失败」与「正常退出」在这里分不开，想区分也区分不了。
+	// 所以这里定义的不是「失败才重启」，而是「不是我叫它停的，就再起一次」。
+	RestartOnFailure = "on-failure"
+)
+
 // UngroupedName 是没写 group 的服务在界面上的分组名。
 // 分组完全由清单里的 group 字段决定，不按目录、不按类型猜——
 // 猜出来的分组看着聪明，但一旦猜错，用户没有任何地方能把它改回来。
@@ -65,6 +75,16 @@ type Service struct {
 	// 不同项目常需要不同 JDK（例如某个工程要求 21、另一个要求 8），
 	// 因此版本必须能按服务指定，不能只留一个全局值。
 	Toolchain map[string]string `yaml:"toolchain" json:"toolchain,omitempty"`
+
+	// DependsOn 是启动顺序上的前置服务名：它们先起来，本服务才轮到。
+	//
+	// 只影响顺序，不改变「能不能起」：前置起失败了本服务照样会起。
+	// 这里不做编排——一个本地启停工具替用户判断「依赖没好就别起了」，
+	// 在真实项目里只会让人更费解（前置的健康检查没过、端口还没通，
+	// 而服务本身其实完全起得来）。顺序是确定的收益，判定不是。
+	DependsOn []string `yaml:"depends_on" json:"depends_on,omitempty"`
+	// Restart 是进程意外退出后的重启策略，取值见 RestartOnFailure；留空不重启。
+	Restart string `yaml:"restart" json:"restart,omitempty"`
 
 	// Origin 记录这条定义来自 pier.yaml 还是覆盖文件，由加载时填充。
 	// 界面据此决定「删除」是能真删，还是只能隐藏。
@@ -223,6 +243,83 @@ func (c *Config) validateServices() error {
 		if s.Kind == KindJava && s.Module == "" && s.Run == "" {
 			return fmt.Errorf("服务 %s 是 Java 服务，必须给出 module（Maven 子模块名）或直接写 run", s.Name)
 		}
+		if s.Restart != "" && s.Restart != RestartOnFailure {
+			return fmt.Errorf("服务 %s 的 restart 无效：%s（可用：%s，或留空表示不自动重启）", s.Name, s.Restart, RestartOnFailure)
+		}
+		for _, d := range s.DependsOn {
+			if strings.TrimSpace(d) == "" {
+				return fmt.Errorf("服务 %s 的 depends_on 里有空名字", s.Name)
+			}
+		}
+	}
+
+	// 依赖的校验排在上面那个循环之外：一条依赖指向的名字可能排在它后面，
+	// 边读边查会把「顺序不同」误报成「名字不存在」。
+	for _, s := range c.Services {
+		for _, d := range s.DependsOn {
+			if d == s.Name {
+				return fmt.Errorf("服务 %s 依赖了自己", s.Name)
+			}
+			if !seen[d] {
+				return fmt.Errorf("服务 %s 依赖的 %s 不在清单里", s.Name, d)
+			}
+		}
+	}
+	if cycle := c.dependencyCycle(); len(cycle) > 0 {
+		return fmt.Errorf("服务依赖成环：%s", strings.Join(cycle, " → "))
+	}
+	return nil
+}
+
+// dependencyCycle 找出一条依赖环并原样返回，如 [a b a]；没有环时返回 nil。
+//
+// 成环必须在这里拦下，不能留给启动顺序去兜：拓扑排序遇到环时要么死循环，
+// 要么随手丢掉几条依赖，而「丢掉的恰好是你最需要的那条」是查不出来的。
+// 把环本身写进报错里，用户看一眼就知道该删哪条。
+func (c *Config) dependencyCycle() []string {
+	deps := make(map[string][]string, len(c.Services))
+	for _, s := range c.Services {
+		deps[s.Name] = s.DependsOn
+	}
+	const (
+		white = 0 // 还没走到
+		gray  = 1 // 正在这条路径上
+		black = 2 // 子树已走完
+	)
+	state := make(map[string]int, len(c.Services))
+	var path []string
+
+	var walk func(string) []string
+	walk = func(name string) []string {
+		state[name] = gray
+		path = append(path, name)
+		for _, d := range deps[name] {
+			switch state[d] {
+			case gray:
+				// 截出环的那一段：从 d 第一次进路径的位置到这里。
+				for i, p := range path {
+					if p == d {
+						return append(append([]string{}, path[i:]...), d)
+					}
+				}
+				return append(append([]string{}, path...), d)
+			case white:
+				if found := walk(d); found != nil {
+					return found
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		state[name] = black
+		return nil
+	}
+
+	for _, s := range c.Services {
+		if state[s.Name] == white {
+			if found := walk(s.Name); found != nil {
+				return found
+			}
+		}
 	}
 	return nil
 }
@@ -233,6 +330,60 @@ func validKind(k string) bool {
 		return true
 	}
 	return false
+}
+
+// StartOrder 返回按依赖排好的启动顺序：每个服务都排在它依赖的那些之后。
+//
+// 同一层里保持清单里的原顺序，而不是按名字排序——清单顺序是列在人眼前的顺序，
+// 界面上「全部启动」按的就是它，排完依赖之后它不该再变一次。
+//
+// 成环时不会卡住（validate 已经拦在前面，这里只是不让它死循环）：剩下的按原顺序补在后面。
+func (c *Config) StartOrder() []*Service {
+	done := make(map[string]bool, len(c.Services))
+	out := make([]*Service, 0, len(c.Services))
+	for len(out) < len(c.Services) {
+		progress := false
+		for _, s := range c.Services {
+			if done[s.Name] {
+				continue
+			}
+			ready := true
+			for _, d := range s.DependsOn {
+				if !done[d] {
+					ready = false
+					break
+				}
+			}
+			if !ready {
+				continue
+			}
+			done[s.Name] = true
+			out = append(out, s)
+			progress = true
+		}
+		if !progress {
+			for _, s := range c.Services {
+				if !done[s.Name] {
+					done[s.Name] = true
+					out = append(out, s)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// StopOrder 是启动顺序倒过来。
+//
+// 反着停是因为反过来才对：先起的那一批往往是后面那些要连的东西
+// （数据库、注册中心、网关），先停它们等于让还在跑的服务对着一个已经关掉的端口。
+// 不反的话，成批停止时日志里会多出一串没有意义的连接错误。
+func (c *Config) StopOrder() []*Service {
+	order := c.StartOrder()
+	for i, j := 0, len(order)-1; i < j; i, j = i+1, j-1 {
+		order[i], order[j] = order[j], order[i]
+	}
+	return order
 }
 
 // Find 按名字取服务。

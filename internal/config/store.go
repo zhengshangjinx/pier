@@ -87,6 +87,28 @@ func IsStorePath(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".json")
 }
 
+// Resolve 决定这次用哪份清单，并给出它的来源说法。
+//
+// 命令行给了 --config 就用它（YAML 清单只读，编辑入口要收起来）；否则用 Pier
+// 自己的数据文件，不存在就建一个空的。图形界面、命令行面板与本地接口都必须
+// 按同一条规则选，否则同一个参数在三处会加载出三份不同的清单。
+func Resolve(flagPath string) (path, source string, err error) {
+	if p := strings.TrimSpace(flagPath); p != "" {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		return p, "命令行指定", nil
+	}
+	store, err := DefaultStorePath()
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := EnsureStore(store, nil); err != nil {
+		return "", "", err
+	}
+	return store, "本机数据", nil
+}
+
 // Open 按扩展名打开：.json 是 Pier 的数据文件，其余当作 YAML 清单（只读，命令行 --config 用）。
 func Open(path string) (*Config, error) {
 	if IsStorePath(path) {
@@ -262,14 +284,34 @@ func (c *Config) Upsert(svc *Service) {
 }
 
 // Remove 删掉一个服务，返回是否确实删了。
+//
+// 顺带把别人 depends_on 里指向它的那一条去掉：留着就是一条指向不存在服务的依赖，
+// 下次加载会被判成不合法——用户只是删了个服务，回来却整份清单都读不开了。
 func (c *Config) Remove(name string) bool {
 	for i, s := range c.Services {
 		if s.Name == name {
 			c.Services = append(c.Services[:i], c.Services[i+1:]...)
+			c.dropDependencyOn(name)
 			return true
 		}
 	}
 	return false
+}
+
+// dropDependencyOn 把各服务的 depends_on 里指向 name 的那一条摘掉。
+func (c *Config) dropDependencyOn(name string) {
+	for _, s := range c.Services {
+		if len(s.DependsOn) == 0 {
+			continue
+		}
+		kept := s.DependsOn[:0]
+		for _, d := range s.DependsOn {
+			if d != name {
+				kept = append(kept, d)
+			}
+		}
+		s.DependsOn = kept
+	}
 }
 
 // RenameService 给一个服务改名，位置原地不动。
@@ -288,6 +330,15 @@ func (c *Config) RenameService(oldName, newName string) error {
 	for _, s := range c.Services {
 		if s.Name == oldName {
 			s.Name = newName
+			// 别人 depends_on 里写的是旧名字，跟着一起改。不改的话这条依赖会变成
+			// 指向一个不存在的服务——改名的那个服务自己好好的，坏掉的是依赖它的那些。
+			for _, o := range c.Services {
+				for i, d := range o.DependsOn {
+					if d == oldName {
+						o.DependsOn[i] = newName
+					}
+				}
+			}
 			return nil
 		}
 	}

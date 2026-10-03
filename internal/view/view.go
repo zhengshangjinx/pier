@@ -7,6 +7,8 @@ package view
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/zhengshangjinx/pier/internal/proc"
@@ -116,6 +118,42 @@ func NoteText(st proc.Status) string {
 	default:
 		return ""
 	}
+}
+
+// ShortPath 把路径开头的用户主目录缩成 ~。
+//
+// 端口那一屏里几乎每一行都是主目录底下的项目目录，原样写出来一列要占掉半屏，
+// 有区分度的部分（~ 后面那几级）反倒被挤到看不见的地方。
+//
+// 分隔符两种都认：同一个 ~ 在两套系统上都得能用，而这件事上不需要知道自己在哪一边。
+func ShortPath(p string) string {
+	if p == "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	// 缩的必须是整整一层目录：~/workspace 要缩，~/workspace2 不能缩成 ~2。
+	if len(p) > len(home) && strings.HasPrefix(p, home) && (p[len(home)] == '/' || p[len(home)] == '\\') {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+// OriginText 把一次溯源的结果压成一句「谁把它拉起来的」，认不出来时为 Dash。
+//
+// 链上认出来的可能不止一个：编辑器里的集成终端再起一层 shell，最后才是服务。
+// 从近到远连起来写，「当前位置 ← 再往外是谁」，读作「VS Code 里那个终端」。
+// 只给最近的那一个是不够的——排查时用户记的是当时在哪个终端里敲的命令。
+func OriginText(o *proc.Origin) string {
+	if o == nil || !o.OK() || len(o.Chain) == 0 {
+		return Dash
+	}
+	return strings.Join(o.Chain, " ← ")
 }
 
 // Bytes 把字节数压成「1.2 GB」这类紧凑形式，用于日志占用与清理回执。

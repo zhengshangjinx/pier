@@ -1,6 +1,7 @@
 package view
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,65 @@ func TestBytes(t *testing.T) {
 	for _, c := range cases {
 		if got := Bytes(c.in); got != c.want {
 			t.Errorf("Bytes(%d) = %q，想要 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// ── 端口那一屏的展示 ───────────────────────────────────────────────────────
+
+// TestShortPath 钉着两件事：缩的必须是整整一层目录，以及外来路径原样返回。
+//
+// 缩多一格（~/workspace2 → ~2）是个看起来对、实际指到别处去的错，
+// 而这一列是要被人当路径读的。
+func TestShortPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("拿不到主目录")
+	}
+
+	sep := string(os.PathSeparator)
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{home, "~"},
+		{home + sep + "workspace", "~" + sep + "workspace"},
+		{home + sep + "workspace" + sep + "pier", "~" + sep + "workspace" + sep + "pier"},
+		// 前缀相同但不是同一层：不能缩。
+		{home + "2", home + "2"},
+		{home + "2" + sep + "x", home + "2" + sep + "x"},
+		{sep + "opt" + sep + "home", sep + "opt" + sep + "home"},
+		{"相对路径", "相对路径"},
+	}
+	for _, c := range cases {
+		if got := ShortPath(c.in); got != c.want {
+			t.Errorf("ShortPath(%q) = %q，想要 %q", c.in, got, c.want)
+		}
+	}
+
+	// 另一套分隔符也认：同一个 ~ 在 Windows 上一样要用。
+	if got := ShortPath(home + `\workspace`); got != `~\workspace` {
+		t.Errorf("反斜杠那一侧 ShortPath = %q，想要 %q", got, `~\workspace`)
+	}
+}
+
+func TestOriginText(t *testing.T) {
+	cases := []struct {
+		name string
+		in   *proc.Origin
+		want string
+	}{
+		{"认不出来", nil, Dash},
+		{"空结果", &proc.Origin{}, Dash},
+		{"只有类别没有链", &proc.Origin{Kind: "editor", Label: "VS Code"}, Dash},
+		{"一层", &proc.Origin{Kind: "terminal", Label: "终端", Chain: []string{"终端"}}, "终端"},
+		{
+			"编辑器里的集成终端",
+			&proc.Origin{Kind: "terminal", Label: "终端", Chain: []string{"终端", "VS Code"}},
+			"终端 ← VS Code",
+		},
+	}
+	for _, c := range cases {
+		if got := OriginText(c.in); got != c.want {
+			t.Errorf("%s：OriginText = %q，想要 %q", c.name, got, c.want)
 		}
 	}
 }

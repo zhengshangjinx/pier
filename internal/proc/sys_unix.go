@@ -3,6 +3,7 @@
 package proc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -358,7 +359,64 @@ func PortOwnerOf(port int) (*PortOwner, error) {
 	if o.User == "" {
 		o.User = strconv.Itoa(o.UID)
 	}
+	// 溯源放在最后：它是这里最贵的一步（要读一遍全表），
+	// 而前面几步任一失败都白搭。整条路只在用户点开「端口被谁占了」时才走一次。
+	if org := ProcessOrigin(o.PID); org.OK() {
+		o.Origin = &org
+	}
 	return o, nil
+}
+
+// cwdOf 查出这些进程各自的工作目录。
+//
+// 一次问全：lsof 的 -p 收一串逗号分隔的 PID，逐个问就是逐个 exec，
+// 而这正是「端口发现」那一屏要用的——一屏几十个监听进程，逐个问要等上几秒。
+//
+// 拿不到就留空（别的用户的进程、已经退出的、容器里的），不算失败：
+// 工作目录只是「这个端口背后大概是什么项目」的线索，缺了不影响那一屏成立。
+func cwdOf(pids []int) map[int]string {
+	if len(pids) == 0 {
+		return nil
+	}
+	list := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if pid > 0 {
+			list = append(list, strconv.Itoa(pid))
+		}
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	// -a 是必须的：不给的话 lsof 会把「这些 PID」与「cwd 这一项」按或的关系取并集，
+	// 于是全机的进程都会被列出来。
+	//
+	// 退出码不用管：只要有一个 PID 已经退出，lsof 就返回非零，但其余的结果照常写在
+	// 标准输出里（Output 在失败时也会把已读到的输出给回来）。所以这里看的是有没有内容，
+	// 不是 err 是不是 nil。
+	out, _ := sysOutput("lsof", "-a", "-p", strings.Join(list, ","), "-d", "cwd", "-Fpn")
+	if len(out) == 0 {
+		return nil
+	}
+	dirs := map[int]string{}
+	pid := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 2 {
+			continue
+		}
+		val := line[1:]
+		switch line[0] {
+		case 'p':
+			if n, err := strconv.Atoi(val); err == nil {
+				pid = n
+			}
+		case 'n':
+			// 一个进程只取第一条：cwd 是单份的，多出来的只可能是同名的软链。
+			if pid > 0 && dirs[pid] == "" {
+				dirs[pid] = val
+			}
+		}
+	}
+	return dirs
 }
 
 // ── 资源的读法 ─────────────────────────────────────────────────────────────
@@ -470,6 +528,22 @@ func parseProcRows(out []byte) []procRow {
 // 进程崩了由内核释放，不会留下需要人工清理的残留。
 func lockFile(f *os.File) error {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+}
+
+// tryLockFile 加锁，但被占着时不等待，直接返回 false。
+//
+// 用 LOCK_NB 而不是把 LOCK_EX 放进一个带着超时的循环：这里问的是
+// 「此刻有没有人在做这件事」，答案是「有」就该立刻走开，等一下再问没有意义——
+// 拿到锁的那个进程会一直握着到它退出为止。
+func tryLockFile(f *os.File) (bool, error) {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return false, nil
+	}
+	return false, err
 }
 
 func unlockFile(f *os.File) {

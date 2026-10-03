@@ -654,8 +654,18 @@ func PortOwnerOf(port int) (*PortOwner, error) {
 	if started, args, err := processTimes(o.PID); err == nil {
 		o.Started, o.Args = started, args
 	}
+	if org := ProcessOrigin(o.PID); org.OK() {
+		o.Origin = &org
+	}
 	return o, nil
 }
+
+// cwdOf 在 Windows 上取不到进程的工作目录。
+//
+// 进程快照里只有 PID、父进程与可执行文件名，工作目录不在这份数据里；
+// 要拿它得走 WMI 的 Win32_Process.Directory，那既慢又要依赖 WMI 服务可用。
+// 宁可返回空——调用方会退回用清单里写着的位置，那是它本来就有的信息。
+func cwdOf(pids []int) map[int]string { return nil }
 
 // ── 资源的读法 ─────────────────────────────────────────────────────────────
 
@@ -825,6 +835,23 @@ func lockFile(f *os.File) error {
 	var ov windows.Overlapped
 	return windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov)
+}
+
+// tryLockFile 加锁，但被占着时不等待，直接返回 false。
+//
+// FAIL_IMMEDIATELY 就是 LockFileEx 上的那一档：拿不到立刻返回
+// ERROR_LOCK_VIOLATION，而不是阻塞到别人放开为止。
+func tryLockFile(f *os.File) (bool, error) {
+	var ov windows.Overlapped
+	err := windows.LockFileEx(windows.Handle(f.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return false, nil
+	}
+	return false, err
 }
 
 func unlockFile(f *os.File) {

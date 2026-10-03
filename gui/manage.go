@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/manage"
 )
 
@@ -33,6 +34,25 @@ func (a *app) killPortOwner(name, pidRaw, started string) string {
 		return errJSON(err.Error())
 	}
 	return okJSON(msg)
+}
+
+func (a *app) portScan() string {
+	out, err := a.mgr.ScanPorts()
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	return marshal(out)
+}
+
+// adoptPort 只做一次「能不能收进来」的预演：它读目录、认类型、挑一个空闲端口，
+// 返回的是检查结果，不落盘。真正写清单的还是 saveService——用户要在表单里
+// 看过一遍再按保存，而不是点一下「纳管」清单就悄悄变了。
+func (a *app) adoptPort(portRaw, name string) string {
+	out, err := a.mgr.AdoptPort(portRaw, name)
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	return marshal(out)
 }
 
 // saveService 收的是一段 JSON 字符串——这是 webview 绑定的形状，不是业务层的。
@@ -226,7 +246,7 @@ func (a *app) openConfig() string {
 // 「打开清单…」选了 YAML 就整份只读，收起了全部编辑入口——没有这条退路的话，
 // 从访达双击启动的人（没有命令行可以去掉 --config）只能重启一次才能回来。
 func (a *app) useLocalConfig() string {
-	path, src, err := resolveConfig("")
+	path, src, err := config.Resolve("")
 	if err != nil {
 		return errJSON(err.Error())
 	}

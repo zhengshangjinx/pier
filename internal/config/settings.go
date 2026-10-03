@@ -23,6 +23,14 @@ type Settings struct {
 	SDKs map[string][]string `json:"sdks,omitempty"`
 	// SDKDefaults 是各类别的全局默认 SDK（路径）。没设的类别按规则自动选。
 	SDKDefaults map[string]string `json:"sdkDefaults,omitempty"`
+
+	// APIToken 是本地 HTTP 接口的访问令牌，空表示还没生成过。
+	//
+	// 存下来而不是每次启动现生成：脚本是从别处读它的，每次重启换一个的话，
+	// 写好的脚本隔天就跑不通了。
+	APIToken string `json:"apiToken,omitempty"`
+	// APIPort 是本地 HTTP 接口监听的端口，0 或越界时用默认值。
+	APIPort int `json:"apiPort,omitempty"`
 }
 
 // SettingsPath 返回默认数据目录下的偏好文件路径。

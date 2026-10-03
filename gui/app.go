@@ -38,7 +38,7 @@ func newApp(flagPath string) *app {
 	a := &app{panel: panel.New()}
 	a.mgr = a.panel.Manager()
 
-	path, src, err := resolveConfig(flagPath)
+	path, src, err := config.Resolve(flagPath)
 	if err != nil {
 		a.panel.SetLoadError(err.Error())
 		return a
@@ -98,6 +98,9 @@ func (a *app) bindings() []binding {
 		// 让系统弹框选目录，以及一次列一批候选端口
 		{"pierPickDirectory", a.pickDirectory},
 		{"pierPortCandidates", a.portCandidates},
+		// 扫一遍本机在听的端口，把它们收进清单
+		{"pierPortScan", a.portScan},
+		{"pierAdoptPort", a.adoptPort},
 		// 分组的新增 / 重命名 / 删除
 		{"pierCreateGroup", a.createGroup},
 		{"pierRenameGroup", a.renameGroup},

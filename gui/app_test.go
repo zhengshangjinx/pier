@@ -315,12 +315,18 @@ func TestPortCandidatesAreActuallyFree(t *testing.T) {
 		if used[p] {
 			t.Errorf("端口 %d 清单里已经写掉了，却被当成空闲的", p)
 		}
+	}
+	for _, p := range append(append([]int{}, out.Used...), out.Taken...) {
 		if p > out.ScanTo {
 			t.Errorf("端口 %d 超出了声明的扫描上界 %d", p, out.ScanTo)
 		}
 	}
-	if out.ScanTo != 10080 {
-		t.Errorf("扫描上界应当是 from+2000=10080，实际 %d", out.ScanTo)
+	// 扫描上界是「这一趟真正看过的最后一个端口」，不是 from+2000 那个预算。
+	// 找满一批候选就收工了，报一个没看过的上界等于让界面说假话——用户会以为
+	// 更靠后的端口也查过了，而那里到底有没有被占，这次根本没看。
+	if out.ScanTo != out.Free[len(out.Free)-1] {
+		t.Errorf("扫描上界应当是最后一个看过的端口 %d，实际 %d",
+			out.Free[len(out.Free)-1], out.ScanTo)
 	}
 	// 两种冲突要分开报：清单里写了但没在跑的，和真被别的进程占着的，
 	// 处理办法完全不同，混成一个列表界面就没法给出正确的建议。
@@ -759,6 +765,9 @@ func TestUIFieldNamesExistInBackend(t *testing.T) {
 		{[]string{"occupant"}, keysOf(proc.Listener{}), "监听进程"},
 		{[]string{"info"}, keysOf(manage.InspectOut{}), "目录检查"},
 		{[]string{"cand"}, keysOf(manage.PortCandOut{}), "端口候选"},
+		// 端口扫描与纳管。「scan」不能改叫 data：那个名字上挂的是面板状态结构。
+		{[]string{"scan"}, keysOf(manage.PortScanOut{}), "端口扫描"},
+		{[]string{"sp"}, keysOf(manage.ScannedPort{}), "扫描到的端口"},
 		{[]string{"logData"}, keysOf(panel.LogOut{}), "日志"},
 		// SDK 管理页与表单里那次工具链预演。
 		//

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/proc"
+	"github.com/zhengshangjinx/pier/internal/view"
 )
 
 // ErrNoConfig 表示清单还没加载出来，此时任何需要清单的动作都做不了。
@@ -274,6 +276,13 @@ type ServiceIn struct {
 	// 值为空串表示不指定、按规则自动选；没出现的类别保留原值。
 	Env       map[string]string `json:"env"`
 	Toolchain map[string]string `json:"toolchain"`
+	// DependsOn 是启动顺序上的前置服务名。和 Env 一样，为 nil 表示调用方没管这一项，
+	// 保留原值；传空数组才表示「把前置清掉」——JSON 里 null 与 [] 本来就分得开，
+	// 不利用这一点的话，「编辑备注」会把依赖悄悄抹掉。
+	DependsOn []string `json:"dependsOn"`
+	// Restart 是重启策略，空串表示不自动重启（也是默认值），所以不需要保留语义：
+	// 表单每次都把它发全，缺省就等于用户没要。
+	Restart string `json:"restart"`
 	// OrigName 是「这次提交之前它叫什么」。表单里名称那一栏是可以改的，改了名字
 	// 的那一次提交必须先改名再覆盖保存：直接按新名字 Upsert 会多出一条，旧的那条
 	// 原样留在清单里，而用户以为自己只是改了个名字。
@@ -289,7 +298,29 @@ func (in ServiceIn) toService() *config.Service {
 		Run: strings.TrimSpace(in.Run), Build: strings.TrimSpace(in.Build),
 		Module: strings.TrimSpace(in.Module), Script: strings.TrimSpace(in.Script),
 		Port: in.Port, Health: strings.TrimSpace(in.Health), Note: strings.TrimSpace(in.Note),
+		Restart: strings.TrimSpace(in.Restart),
 	}
+}
+
+// cleanDeps 收拾一份前置清单：去空白、去空名、去重，保持原本的先后。
+//
+// 去重不是为了省事：界面上那句「将先启动 a、a」是照原样拼的，
+// 重名一进去就会显示成这样，而用户根本分不清那是两条还是一条。
+func cleanDeps(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, d := range in {
+		d = strings.TrimSpace(d)
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SaveService 新增或修改一个服务。
@@ -355,8 +386,13 @@ func (m *Manager) SaveService(in ServiceIn) (string, error) {
 	// 只改一个备注也会让 demo-admin 丢掉 APP_ENV=dev、shop-admin 丢掉钉住的 JDK。
 	// toolchain 只改提交里出现的类别，没出现的沿用。
 	var oldEnv, oldTool map[string]string
+	var oldDeps []string
 	if old, err := st.Find(svc.Name); err == nil {
-		oldEnv, oldTool = old.Env, old.Toolchain
+		oldEnv, oldTool, oldDeps = old.Env, old.Toolchain, old.DependsOn
+	}
+	svc.DependsOn = oldDeps
+	if in.DependsOn != nil {
+		svc.DependsOn = cleanDeps(in.DependsOn)
 	}
 	svc.Env = oldEnv
 	if in.Env != nil {
@@ -842,6 +878,10 @@ type InspectOut struct {
 	Names []string `json:"names"`
 	// Groups 是已有的分组，供下拉选择。
 	Groups []string `json:"groups"`
+	// Adopted 说明这次是从哪个正在跑的进程纳管来的（如「PID 1234（node）」），
+	// 空表示是用户手填目录进来的。界面据此说一句「照这个进程推的」，
+	// 并提醒它此刻还在跑、保存之后要先停掉才能由 Pier 接管。
+	Adopted string `json:"adopted"`
 }
 
 // InspectHint 是表单上已经填好的、会影响启动方式的几栏。
@@ -1024,7 +1064,8 @@ type PortCandOut struct {
 	Used []int `json:"used"`
 	// Taken 是扫描范围内正被某个进程监听的端口。
 	Taken []int `json:"taken"`
-	// ScanTo 是本次扫描到的上界，界面据此说明「只看了这一段」。
+	// ScanTo 是这一趟真正看过的最后一个端口，界面据此说明「只看了这一段」。
+	// 它不等于 from+portCandScan：找满一批可用端口就停了，看过的往往远没那么多。
 	ScanTo int `json:"scanTo"`
 	// Hints 是常见端口的用途备注，纯提示，Pier 不据此做任何判断。
 	Hints map[string]string `json:"hints"`
@@ -1066,10 +1107,17 @@ func (m *Manager) PortCandidates(fromRaw string) (*PortCandOut, error) {
 
 	out := &PortCandOut{From: from, Hints: portHints,
 		Free: []int{}, Used: []int{}, Taken: []int{}}
+	// scanned 记的是这一趟真正看过的最后一个端口，不是「本来打算看到哪儿」。
+	//
+	// 找满 PortCandCount 个可用端口就收工了，那通常发生在前几十个号里；这时
+	// 报一个 from+portCandScan 的上界，界面那句「只看了 X–Y 这一段」就是假的：
+	// 用户会以为更靠后的端口也查过了，而那里到底有没有被占，这次根本没看。
+	scanned := from
 	for p := from; p <= 65535 && len(out.Free) < PortCandCount; p++ {
 		if p > from+portCandScan {
 			break
 		}
+		scanned = p
 		_, taken := listening[p]
 		if taken {
 			out.Taken = append(out.Taken, p)
@@ -1081,10 +1129,153 @@ func (m *Manager) PortCandidates(fromRaw string) (*PortCandOut, error) {
 		}
 		out.Free = append(out.Free, p)
 	}
-	out.ScanTo = from + portCandScan
-	if out.ScanTo > 65535 {
-		out.ScanTo = 65535
-	}
+	out.ScanTo = scanned
 	out.OK = true
+	return out, nil
+}
+
+// ── 端口发现 ───────────────────────────────────────────────────────────────
+//
+// 与上面的 PortCandidates 是相反的一问：那个问「有哪些端口可以给我用」，
+// 这个问「此刻开着的是些什么」。后者是「我想管的东西已经在跑了，只是还没进清单」
+// 那一步的入口——照着正在跑的进程把服务建出来，比照着记忆一笔一笔填表单准。
+
+// ScannedPort 是端口扫描里的一行：一个正被监听的端口，以及它背后是什么。
+type ScannedPort struct {
+	Port int `json:"port"`
+	PID  int `json:"pid"`
+	// Command 是监听进程的名字，如 node、java。
+	Command string `json:"command"`
+	User    string `json:"user"`
+	// Dir 是监听进程的工作目录，查不到时为空。它是「这大概是个什么项目」的判断依据。
+	Dir string `json:"dir"`
+	// DirShort 是 Dir 的展示形式（主目录缩成 ~），与命令行共用同一个字符串。
+	// 界面拿它渲染，拿 Dir 去开目录、去比对，两件事不要混。
+	DirShort string `json:"dirShort"`
+	// Service 是它对应的 Pier 服务名，空表示不属于 Pier。
+	Service string `json:"service"`
+	// Managed 为真表示这正是 Pier 启动的某个服务。
+	Managed bool `json:"managed"`
+	// Origin 是「谁把它拉起来的」，认不出来时为 nil。
+	Origin *proc.Origin `json:"origin,omitempty"`
+	// Known 是清单里那条目录正好是这个目录的服务名，空表示清单里没有。
+	// 与 Service 不是一回事：那个说「此刻是 Pier 起的」，这个说「清单里有它的位置」。
+	Known string `json:"known"`
+}
+
+// PortScanOut 是「本机此刻开着哪些端口」的答案。
+type PortScanOut struct {
+	OK    bool          `json:"ok"`
+	Msg   string        `json:"msg"`
+	Ports []ScannedPort `json:"ports"`
+}
+
+// ScanPorts 列出本机正在监听的 TCP 端口与各自背后的进程。
+//
+// 一次 lsof 问全表，再一次性把工作目录与来源查出来：逐个端口各问一遍的话，
+// 一屏十几行就是几十次 exec，点开这一屏要等上好几秒。
+func (m *Manager) ScanPorts() (*PortScanOut, error) {
+	cfg := m.Config()
+	if cfg == nil {
+		return nil, ErrNoConfig
+	}
+	// 先看依赖的系统命令在不在。不在的话下面拿到的是空表，而空表在这件事上
+	// 等于「本机什么也没在跑」——那是个和事实相反、又看不出哪里不对的结论。
+	if err := proc.PortToolsAvailable(); err != nil {
+		return &PortScanOut{Msg: err.Error()}, nil
+	}
+	listening := proc.ListeningInfo()
+	if listening == nil {
+		return &PortScanOut{Msg: "读不到本机的监听端口列表"}, nil
+	}
+
+	pids := make([]int, 0, len(listening))
+	for _, l := range listening {
+		if l.PID > 0 {
+			pids = append(pids, l.PID)
+		}
+	}
+	dirs := proc.WorkDirs(pids)
+	origins := proc.Origins(pids)
+
+	state, err := proc.LoadState(cfg.StatePath())
+	if err != nil {
+		// 认不出自家服务不影响这一屏能不能用，只是少一列判断，照常列出来。
+		state = nil
+	}
+	byDir := make(map[string]string, len(cfg.Services))
+	for _, s := range cfg.Services {
+		byDir[s.AbsDir()] = s.Name
+	}
+
+	out := &PortScanOut{OK: true, Ports: make([]ScannedPort, 0, len(listening))}
+	for port, l := range listening {
+		row := ScannedPort{Port: port, PID: l.PID, Command: l.Command, User: l.User,
+			Dir: dirs[l.PID], DirShort: view.ShortPath(dirs[l.PID]), Known: byDir[dirs[l.PID]]}
+		if l.PID > 0 {
+			if name := proc.ManagedName(state, l.PID); name != "" {
+				row.Managed, row.Service = true, name
+			}
+			if o, ok := origins[l.PID]; ok {
+				row.Origin = &o
+			}
+		}
+		out.Ports = append(out.Ports, row)
+	}
+	// 按端口升序。不按「能不能纳管」分堆：那个判断在这一屏上看得到（就是有没有
+	// 那几列），而按它排序会让同一屏的顺序随进程起落跳来跳去。
+	sort.Slice(out.Ports, func(i, j int) bool { return out.Ports[i].Port < out.Ports[j].Port })
+	return out, nil
+}
+
+// AdoptPort 把一个已经在跑的端口收进清单。
+//
+// 它只推导、不落盘：照监听进程的工作目录走一遍 InspectDir，把结果当作表单的
+// 预填值交回去，用户看一眼、改一改、点了保存才算数。
+//
+// 不直接建服务的理由很实在：从目录推出的东西只对「一个目录一个服务」的项目成立，
+// 而 monorepo、多模块工程到处都是——那种目录照样推得出命令，起的却不是他要的那个。
+// 表单是用户唯一能改这些的地方，把猜测摆进去让他确认，好过事后去删一条错的。
+func (m *Manager) AdoptPort(portRaw, name string) (*InspectOut, error) {
+	cfg := m.Config()
+	if cfg == nil {
+		return nil, ErrNoConfig
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portRaw))
+	if err != nil || port <= 0 || port > 65535 {
+		return nil, errors.New("无效的端口")
+	}
+	if err := proc.PortToolsAvailable(); err != nil {
+		return nil, err
+	}
+	listening := proc.ListeningInfo()
+	l, ok := listening[port]
+	if !ok || l.PID <= 0 {
+		return nil, fmt.Errorf("端口 %d 上已经没有监听进程了", port)
+	}
+	// 动手之前重新查一遍「此刻占着这个端口的是谁」，而不是信界面上带过来的那一行：
+	// 那一屏可能已经过去几十秒，而这期间进程完全可能退出、端口被另一个人接走。
+	if managed, err := m.managedName(l.PID); err == nil && managed != "" {
+		return nil, fmt.Errorf("端口 %d 上的进程就是 Pier 的服务 %s，它已经在清单里了", port, managed)
+	}
+
+	dir := proc.WorkDirs([]int{l.PID})[l.PID]
+	out := &InspectOut{OK: false, Names: cfg.Names(), Groups: cfg.Groups(), Existing: cfg.UsedPorts()}
+	if dir == "" {
+		out.Msg = fmt.Sprintf("查不到 PID %d 的工作目录（可能是别的用户的进程，或者它已经不在了），请手动填写项目目录", l.PID)
+		return out, nil
+	}
+
+	// 目录交给 InspectDir 走同一条识别路径：纳管与手动添加必须得出同一个结果，
+	// 各推一份的话，同一个目录从两个入口进去会看到两套不同的启动方式。
+	out, err = m.InspectDir(dir, InspectHint{Name: name})
+	if err != nil {
+		return nil, err
+	}
+	// 端口强制用它正在监听的这个，而不是项目自己声明的那个：纳管的语义就是
+	// 「它已经在这么跑了，照它现在的样子记下来」。项目里那个端口可能是它读环境变量
+	// 之后的默认值，也可能是另一个 profile 用的，跟眼前这个进程没关系。
+	out.SuggestPort, out.PortFrom = port, "正在监听的端口"
+	out.Adopted = fmt.Sprintf("PID %d（%s）", l.PID, l.Command)
 	return out, nil
 }

@@ -2,13 +2,16 @@ package manage
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/proc"
+	"github.com/zhengshangjinx/pier/internal/view"
 )
 
 // baseYAML 是导入前的旧清单。刻意给 alpha 带上 note 和 run：分组改名只该动
@@ -1130,5 +1133,163 @@ func TestEveryMethodRefusesWithoutConfig(t *testing.T) {
 				t.Errorf("错误 = %v，应当是 ErrNoConfig", err)
 			}
 		})
+	}
+}
+
+// ── 端口扫描 ───────────────────────────────────────────────────────────────
+
+// TestScanPortsFindsOurOwnListener 起一个真的监听，看它出不出来。
+//
+// 这一屏的全部价值在于「本机此刻真开着什么」，所以这里不塞假数据：真的 bind 一个
+// 端口，再走一遍真正的 lsof。外部命令不在时跳过而不是失败——那是机器的事，
+// 不是代码的事，而这条用例在装了 lsof 的机器上仍然是有意义的。
+func TestScanPortsFindsOurOwnListener(t *testing.T) {
+	if err := proc.PortToolsAvailable(); err != nil {
+		t.Skipf("这台机器上看不了端口：%v", err)
+	}
+	h := newHarness(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败：%v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	out, err := h.m.ScanPorts()
+	if err != nil {
+		t.Fatalf("扫描失败：%v", err)
+	}
+	// 扫不动和「扫出来是空的」必须分得开：后者看着就像本机什么也没在跑。
+	if !out.OK {
+		t.Fatalf("扫描没成功：%s", out.Msg)
+	}
+
+	var hit *ScannedPort
+	for i := range out.Ports {
+		if out.Ports[i].Port == port {
+			hit = &out.Ports[i]
+			break
+		}
+	}
+	if hit == nil {
+		t.Fatalf("没扫到自己起的 %d（一共 %d 行）", port, len(out.Ports))
+	}
+	if hit.PID <= 0 {
+		t.Errorf("没认出监听进程：%+v", hit)
+	}
+	// 命令行与界面必须显示同一个字符串：各缩各的迟早一个「~/w/a」一个「~/w/b」。
+	if got := view.ShortPath(hit.Dir); got != hit.DirShort {
+		t.Errorf("DirShort = %q，ShortPath(Dir) = %q", hit.DirShort, got)
+	}
+}
+
+// TestScanPortsSortedByPort 钉着按端口升序。
+//
+// 不按「能不能纳管」分堆：那个判断在这一屏上看得到（就是有没有那几列），
+// 而按它排序会让同一屏的顺序随进程起落跳来跳去。
+func TestScanPortsSortedByPort(t *testing.T) {
+	if err := proc.PortToolsAvailable(); err != nil {
+		t.Skipf("这台机器上看不了端口：%v", err)
+	}
+	h := newHarness(t)
+	out, err := h.m.ScanPorts()
+	if err != nil || !out.OK {
+		t.Skipf("扫描不可用：%v %s", err, out.Msg)
+	}
+	for i := 1; i < len(out.Ports); i++ {
+		if out.Ports[i-1].Port > out.Ports[i].Port {
+			t.Fatalf("第 %d 行 %d 排在了 %d 后面", i, out.Ports[i].Port, out.Ports[i-1].Port)
+		}
+	}
+}
+
+// TestScanPortsNeedsConfig 钉着没有清单时直接拒绝，而不是给一张空表。
+func TestScanPortsNeedsConfig(t *testing.T) {
+	m := New(nil)
+	if _, err := m.ScanPorts(); !errors.Is(err, ErrNoConfig) {
+		t.Errorf("err = %v，想要 ErrNoConfig", err)
+	}
+}
+
+// TestAdoptPortReadsTheLiveProcess 钉着纳管的语义：照它此刻的样子记下来。
+//
+// 端口一律用进程正在监听的那个，而不是项目文件里声明的那个。同一个项目在
+// 另一个 profile、另一组环境变量下完全可能监听另一个端口，项目里写的那个
+// 跟眼前这个进程没有关系。
+func TestAdoptPortReadsTheLiveProcess(t *testing.T) {
+	if err := proc.PortToolsAvailable(); err != nil {
+		t.Skipf("这台机器上看不了端口：%v", err)
+	}
+	h := newHarness(t)
+
+	// 在清单里的某个服务目录下起一个监听，让纳管能认出这是个什么项目。
+	svc := h.svc("alpha")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败：%v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	out, err := h.m.AdoptPort(strconv.Itoa(port), "被纳管的")
+	if err != nil {
+		t.Fatalf("纳管失败：%v", err)
+	}
+	if out.SuggestPort != port {
+		t.Errorf("建议端口 = %d，想要 %d", out.SuggestPort, port)
+	}
+	if out.PortFrom == "" {
+		t.Error("没说这个端口是怎么来的")
+	}
+	// 说清楚纳的是谁：点这一下的人要能核对「纳的确实是我看到的那个进程」。
+	if !strings.Contains(out.Adopted, strconv.Itoa(os.Getpid())) {
+		t.Errorf("Adopted = %q，没写出 PID", out.Adopted)
+	}
+	if out.SuggestName == "" {
+		t.Error("没给出建议的服务名，界面预填不了")
+	}
+	_ = svc
+}
+
+// TestAdoptPortRefusesGonePort 钉着「端口上已经没有监听进程了」。
+//
+// 纳管是异步的：界面上那一屏可能已经过去几十秒，进程完全可能退出、端口被
+// 另一个人接走。动手之前重新查一遍，而不是信带过来的那一行。
+func TestAdoptPortRefusesGonePort(t *testing.T) {
+	if err := proc.PortToolsAvailable(); err != nil {
+		t.Skipf("这台机器上看不了端口：%v", err)
+	}
+	h := newHarness(t)
+
+	// 先占一个端口再放掉，拿到的号此刻没人监听。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败：%v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	_, err = h.m.AdoptPort(strconv.Itoa(port), "x")
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(port)) {
+		t.Errorf("err = %v，想要指出这个端口上已经没人了", err)
+	}
+}
+
+// TestAdoptPortRejectsBadInput 钉着端口先过一遍格式，别到 lsof 那一步才发现。
+func TestAdoptPortRejectsBadInput(t *testing.T) {
+	h := newHarness(t)
+	for _, bad := range []string{"", "abc", "0", "-1", "70000", "80a"} {
+		if _, err := h.m.AdoptPort(bad, "x"); err == nil {
+			t.Errorf("端口 %q 被接受了", bad)
+		}
+	}
+}
+
+// TestAdoptPortNeedsConfig 钉着没有清单时直接拒绝。
+func TestAdoptPortNeedsConfig(t *testing.T) {
+	m := New(nil)
+	if _, err := m.AdoptPort("8080", "x"); !errors.Is(err, ErrNoConfig) {
+		t.Errorf("err = %v，想要 ErrNoConfig", err)
 	}
 }

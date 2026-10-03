@@ -19,10 +19,12 @@ const usageText = `Pier —— 统一启停本地多个项目的命令行工具
   down [服务...]      停止服务
   restart [服务...]   重启服务
   status              列出所有服务的运行状态
+  ports               列出本机正在监听的端口，以及各自是谁起的、在哪个目录
   logs <服务>         查看某个服务的日志（-f 跟随）
   logs --size         查看日志占了多少磁盘
   logs --clean [服务] 清理超过 14 天的日志（--all 清空，不看天数）
   ui                  打开交互式面板
+  api                 起一个只服务本机的 HTTP 接口（--show-token / --rotate / --port N）
 
 通用：
   -h, --help          显示本帮助
@@ -49,6 +51,8 @@ func Run(args []string) int {
 		return cmdImport(rest)
 	case "ui":
 		return cmdUI(rest)
+	case "api":
+		return cmdApi(rest)
 	case "up":
 		return cmdUp(rest)
 	case "down":
@@ -57,6 +61,8 @@ func Run(args []string) int {
 		return cmdRestart(rest)
 	case "status":
 		return cmdStatus(rest)
+	case "ports":
+		return cmdPorts(rest)
 	case "logs":
 		return cmdLogs(rest)
 	case "-h", "--help", "help":

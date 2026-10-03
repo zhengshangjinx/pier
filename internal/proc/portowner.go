@@ -22,6 +22,12 @@ type PortOwner struct {
 	// 这种情况不该「结束进程」，而该走正常的「停止」，否则状态文件会留下一条假记录。
 	Managed bool   `json:"managed"`
 	Service string `json:"service"` // Managed 为真时对应的服务名
+	// Origin 是沿父进程链查出来的「谁把它拉起来的」，认不出来时为 nil。
+	//
+	// 有它才谈得上判断该不该动手：同一个端口上蹲着的可能是刚在编辑器里起的服务，
+	// 也可能是上一轮调试忘了关的终端，还可能是 Pier 面板自己拉起来的那份——
+	// 三者的下一步动作完全不同，而命令行与进程名往往一模一样（都是 node、都是 java）。
+	Origin *Origin `json:"origin,omitempty"`
 }
 
 // ErrNoOwner 表示端口上查不到监听进程（可能刚释放，或监听表读不到）。
@@ -117,6 +123,15 @@ func FreePort(from int, used map[int]bool) int {
 	}
 	return 0
 }
+
+// WorkDirs 查出这些进程各自的工作目录，拿不到的那些不在返回值里。
+//
+// 这是「这个端口背后是哪个项目」唯一靠谱的线索：命令行认不出来（node 起的
+// 到处都是），端口号也认不出来（每个人给 dev server 配的都不一样），
+// 而进程站在哪个目录里几乎是确定的。
+//
+// 一次问一批：一屏几十个监听进程，逐个问就是逐个 exec（见各平台的 cwdOf）。
+func WorkDirs(pids []int) map[int]string { return cwdOf(pids) }
 
 // WaitPortReleased 等待端口不再被监听，用于结束进程后确认端口真的空出来了。
 func WaitPortReleased(port int, timeout time.Duration) bool {

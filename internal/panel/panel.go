@@ -18,8 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/manage"
@@ -32,6 +35,24 @@ const LogLines = 2000
 // LogBytes 是一次从日志文件读取的最大字节数。界面在日志抽屉打开时每秒拉取，
 // 整读一个有几十兆 Maven 输出的文件会把磁盘和内存都拖垮。
 const LogBytes = 256 * 1024
+
+// 自动重启的额度：restartWindow 之内最多 restartLimit 次。
+//
+// 加窗口是为了让额度自己过期。不加的话，一个每隔几天崩一次的服务攒够三次之后
+// 就再也救不回来了——那三次可能横跨一个月。反过来，起来就崩、起来就崩
+// （依赖没装、端口配错）的，十秒内就会用光额度，不至于无限重试下去。
+const (
+	restartWindow = 10 * time.Minute
+	restartLimit  = 3
+	// restartPoll 是查一遍「有没有谁崩了」的间隔。
+	//
+	// 比界面的刷新间隔（两秒）再慢一点：这不是状态展示，是补救动作，
+	// 崩溃之后多等一两秒完全值得，换来的是更少的空转。
+	restartPoll = 3 * time.Second
+
+	// restartLockName 是自动重启独占权的锁文件名，落在数据目录下。
+	restartLockName = "restart.lock"
+)
 
 // job 是一次待执行的启停动作。
 type job struct {
@@ -89,6 +110,30 @@ type Panel struct {
 	jobs    chan job
 	mgr     *manage.Manager
 
+	// restarts 记着每个服务最近几次自动重启的时刻，用来算额度（见 restartWindow）。
+	// 用户自己动过手（启动、停止、重启）就清掉：那是「我知道了，再来」，
+	// 不该还背着一笔自动重启的账。
+	restarts map[string][]time.Time
+
+	// restartClaim 是「自动重启这把活归我干」的独占权，拿不到时为 nil。
+	//
+	// 同一台机器上可以同时开着不止一个 Pier：图形界面、命令行面板、pier api。
+	// 每个都有自己的巡检，而它们看见的是同一个状态文件、同一批服务。不给这件事
+	// 指定唯一的主人，一个崩了的服务会被两边同时拉起来——两套编译、两份日志、
+	// 两个进程抢同一个端口，而两边都以为自己处理得很干净。
+	//
+	// 锁落在数据目录而不是状态文件旁边：独占权说的是「这台机器上的 Pier 谁来巡检」，
+	// 与这一份清单是哪一个无关，也就不必在每次加载清单时换手。
+	restartClaim *proc.Claim
+
+	// done 在 Close 时关上，巡检据此收工。
+	//
+	// 少了这一条，面板关掉之后巡检还在跑：宿主调 Close 说的是「我不干了」，
+	// 而一个还在替人拉服务的协程跟这句话正相反——界面窗口已经关了，
+	// 后台每隔几秒又去看一眼、又去拉一次。
+	done      chan struct{}
+	closeOnce sync.Once
+
 	// notify 在「状态可能变了」时被调用，宿主据此推送事件。
 	//
 	// 它由 worker 协程调用，所以实现必须立刻返回：在这里同步跑一次 State()
@@ -106,14 +151,50 @@ type Panel struct {
 
 // New 建一个空面板并启动执行协程。清单要另外用 Load 装进来。
 func New() *Panel {
-	p := &Panel{ops: map[string]*operation{}, jobs: make(chan job, 256)}
+	p := &Panel{
+		ops:      map[string]*operation{},
+		jobs:     make(chan job, 256),
+		restarts: map[string][]time.Time{},
+		done:     make(chan struct{}),
+	}
 	p.mgr = manage.New(p.Load)
 	// 删除服务前要看一眼这个服务身上有没有没结束的动作：状态文件只记已经拉起来的
 	// 进程，编译中的服务那里什么都没有，光看文件会以为它没在跑。
 	p.mgr.SetBusyProbe(p.HasOp)
 	go p.worker()
+	// 巡检只由拿到独占权的那个进程跑，见 restartClaim。
+	// 清单目录建不出来时也照样跑：拿不到锁顶多是别的进程在巡检，
+	// 而这里是「连目录都没有」，多半是第一次运行，不会有人跟它抢。
+	if claim, ok, err := proc.TryClaim(restartLockPath()); err == nil && ok {
+		p.restartClaim = claim
+		go p.watchRestarts()
+	}
 	return p
 }
+
+// restartLockPath 是自动重启独占权那把锁的位置。
+func restartLockPath() string {
+	d, err := config.Dirs()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "pier-restart.lock")
+	}
+	return filepath.Join(d.Data, restartLockName)
+}
+
+// Close 停掉巡检并交回独占权。进程退出时内核也会释放，这里给的是一个干净的说法，
+// 让宿主在「面板关掉了」和「进程要退出了」之间不必自己区分。
+//
+// 重复调用无妨：宿主可能既在收尾处调一次，又在信号处理里调一次。
+func (p *Panel) Close() {
+	p.closeOnce.Do(func() {
+		close(p.done)
+		p.restartClaim.Release()
+	})
+}
+
+// OwnsRestarts 报告这台机器上的自动重启是不是归这个面板管。
+// 界面据此说明「崩了会自动重启」这句话此刻算不算数。
+func (p *Panel) OwnsRestarts() bool { return p.restartClaim != nil }
 
 // Manager 返回共用的清单编辑业务层，宿主把它接到自己的编辑入口上。
 func (p *Panel) Manager() *manage.Manager { return p.mgr }
@@ -283,6 +364,113 @@ func (p *Panel) exec(j job) {
 	}
 }
 
+// ── 崩溃自愈 ─────────────────────────────────────────────────────────────
+//
+// 只做一件事：配了 restart: on-failure 的服务，如果状态文件里还记着它、
+// 而进程已经不在了，就再拉一次。
+//
+// 为什么是自己轮询而不是让服务退出时通知 Pier：服务是 setsid 出去的独立进程，
+// 日志 fd 由它继承，Pier 这边连一个能 Wait 的句柄都没有——进程什么时候没的，
+// 除了回头去看没有别的途径。轮询因此不是偷懒，是唯一可行的做法。
+
+func (p *Panel) watchRestarts() {
+	t := time.NewTicker(restartPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-t.C:
+			p.recoverCrashed()
+		}
+	}
+}
+
+func (p *Panel) recoverCrashed() {
+	p.mu.Lock()
+	cfg := p.cfg
+	p.mu.Unlock()
+	if cfg == nil {
+		return
+	}
+	// 只看状态文件与进程本身，不调 sup.Status()：那个会顺带列出全部监听端口、
+	// 还会给每个配了探针的服务发一次 HTTP 请求，每几秒跑一遍太贵。
+	// 这里要回答的只有「崩了没有」，读一份 JSON 就够。
+	state, err := proc.LoadState(cfg.StatePath())
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, svc := range cfg.StartOrder() {
+		if svc.Restart != config.RestartOnFailure {
+			continue
+		}
+		e, ok := state.Services[svc.Name]
+		if !ok || proc.EntryAlive(e) {
+			// 没有记录 = 从来没起来过，或者被用户清理过。两种情况都不该自动重来：
+			// 前者多半是启动就失败（端口冲突、依赖没装），再起一次还是同样的结果。
+			continue
+		}
+		p.enqueueRestart(svc, now)
+	}
+}
+
+// enqueueRestart 记一次自动重启并把启动排进队列。
+//
+// 记账与占位在同一把锁里完成，不能拆成「先看看有没有额度、再调 Start」：
+// 两次加锁之间隔着一个 tick 的话，一个每秒都崩的服务会被同一秒里的两次轮询各排一次。
+func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) {
+	p.mu.Lock()
+	if op := p.ops[svc.Name]; op != nil && op.phase != "error" {
+		// 身上已经有动作了——上一次自动重启还在跑，或者用户正动它。
+		p.mu.Unlock()
+		return
+	}
+	kept := p.restarts[svc.Name][:0]
+	for _, at := range p.restarts[svc.Name] {
+		if now.Sub(at) < restartWindow {
+			kept = append(kept, at)
+		}
+	}
+	if len(kept) >= restartLimit {
+		// 额度用光。把记录留着，界面据此说明「它已经自己救过几次、现在不救了」；
+		// 等窗口过去这些时刻会自然过期，额度重新有。
+		p.restarts[svc.Name] = kept
+		p.mu.Unlock()
+		return
+	}
+	op := newOp("start", "queued")
+	p.ops[svc.Name] = op
+	p.restarts[svc.Name] = append(kept, now)
+	p.mu.Unlock()
+
+	p.jobs <- job{kind: "start", svc: svc, op: op}
+	p.fireNotify()
+}
+
+// restartNote 是这个服务此刻该显示的自动重启说明，没有则返回空串。
+func (p *Panel) restartNote(name string) string {
+	cut := time.Now().Add(-restartWindow)
+	p.mu.Lock()
+	at := p.restarts[name]
+	n := 0
+	for _, t := range at {
+		if t.After(cut) {
+			n++
+		}
+	}
+	p.mu.Unlock()
+	switch {
+	case n == 0:
+		return ""
+	case n >= restartLimit:
+		return fmt.Sprintf("进程退出后已自动重启 %d 次，已达上限（%d 分钟 %d 次），暂停自动重启",
+			n, int(restartWindow.Minutes()), restartLimit)
+	default:
+		return fmt.Sprintf("进程退出后已自动重启 %d 次", n)
+	}
+}
+
 // isCurrent 判断这个服务身上排着的还是不是同一个动作。
 //
 // 任务从入队到被取出之间，清单可能被换过（Load 会把不再作数的动作从簿记里撤掉），
@@ -429,6 +617,8 @@ func (p *Panel) begin(kind, name string) (*config.Service, *operation, error) {
 	// 否则界面会一边显示「排队重启」一边显示上次的报错。
 	op := newOp(kind, "queued")
 	p.ops[name] = op
+	// 用户自己动过手，自动重启的额度重新算（见 restarts）。
+	delete(p.restarts, name)
 	return svc, op, nil
 }
 
@@ -443,23 +633,36 @@ func (p *Panel) enqueue(kind, name string) (string, error) {
 	return "", nil
 }
 
-// enqueueAll 把清单里的全部服务排队。顺序即配置顺序，与命令行的 up/down 一致。
+// enqueueAll 把清单里的全部服务排队，顺序由依赖决定（见 startOrder / stopOrder）。
 func (p *Panel) enqueueAll(kind string) (string, error) {
-	p.mu.Lock()
-	cfg := p.cfg
+	cfg := p.Config()
 	if cfg == nil {
-		p.mu.Unlock()
 		return "", manage.ErrNoConfig
 	}
+	return p.enqueueSet(kind, p.order(cfg, kind))
+}
+
+// order 按动作给出该走的顺序：启动顺着依赖，停止反着来（见 config.StopOrder）。
+func (p *Panel) order(cfg *config.Config, kind string) []*config.Service {
+	if kind == "stop" {
+		return cfg.StopOrder()
+	}
+	return cfg.StartOrder()
+}
+
+// enqueueSet 把给定的这批服务排队，顺序就用传进来的顺序。
+func (p *Panel) enqueueSet(kind string, svcs []*config.Service) (string, error) {
+	p.mu.Lock()
 	// 先把能排的都标记上再统一入队：标记与入队在同一把锁里完成，
 	// 中间不会插进另一个请求把同一个服务排两遍。
-	targets := make([]job, 0, len(cfg.Services))
-	for _, svc := range cfg.Services {
+	targets := make([]job, 0, len(svcs))
+	for _, svc := range svcs {
 		if op := p.ops[svc.Name]; op != nil && op.phase != "error" {
 			continue
 		}
 		op := newOp(kind, "queued")
 		p.ops[svc.Name] = op
+		delete(p.restarts, svc.Name)
 		targets = append(targets, job{kind: kind, svc: svc, op: op})
 	}
 	p.mu.Unlock()
@@ -471,6 +674,9 @@ func (p *Panel) enqueueAll(kind string) (string, error) {
 		p.jobs <- j
 	}
 	p.fireNotify()
+	if len(targets) == 1 {
+		return "", nil
+	}
 	return fmt.Sprintf("已把 %d 个服务排入队列，按顺序执行", len(targets)), nil
 }
 
@@ -487,7 +693,70 @@ func (p *Panel) ResetToolchains() {
 // ── 对外的动作 ─────────────────────────────────────────────────────────────
 
 // Start 排队启动一个服务。
-func (p *Panel) Start(name string) (string, error) { return p.enqueue("start", name) }
+//
+// 配了 depends_on 的话，前置的那些会先排进去。单点启动也要带上前置，
+// 否则依赖就只有「全部启动」时才成立——而用户最常做的是点某一个，
+// 那时前置没起来，服务照样起不来，只是错在别处（连不上数据库那类），
+// 报错跟「你少点了一个服务」看不出关系。
+//
+// 前置已经在跑的会被跳过：Start 的入队逻辑对「身上有动作」的服务直接略过，
+// 而一个跑着的服务身上没有动作。前置正卡在别的动作里时也略过，
+// 不会因为它没就绪就把这次启动整个拒掉——顺序是约定，不是准入条件。
+func (p *Panel) Start(name string) (string, error) {
+	cfg := p.Config()
+	if cfg == nil {
+		return "", manage.ErrNoConfig
+	}
+	svc, err := cfg.Find(name)
+	if err != nil {
+		return "", err
+	}
+	if len(svc.DependsOn) == 0 {
+		return p.enqueue("start", name)
+	}
+	want := dependencyClosure(cfg, name)
+	var targets []*config.Service
+	var deps []string
+	for _, s := range cfg.StartOrder() {
+		if !want[s.Name] {
+			continue
+		}
+		targets = append(targets, s)
+		if s.Name != name {
+			deps = append(deps, s.Name)
+		}
+	}
+	msg, err := p.enqueueSet("start", targets)
+	if err != nil {
+		return "", err
+	}
+	if msg == "" {
+		// 前置都在操作中，只剩自己要起。说清楚「前置这次没排」比装作没事好。
+		return fmt.Sprintf("已把 %s 排入队列（前置 %s 正在操作中，本次未重排）", name, joinNames(deps)), nil
+	}
+	return fmt.Sprintf("已把 %s 及其前置 %s 排入队列，按顺序执行", name, joinNames(deps)), nil
+}
+
+// dependencyClosure 返回 name 以及顺着 depends_on 一路能走到的全部名字。
+func dependencyClosure(cfg *config.Config, name string) map[string]bool {
+	in := map[string]bool{name: true}
+	queue := []string{name}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		s, err := cfg.Find(cur)
+		if err != nil {
+			continue
+		}
+		for _, d := range s.DependsOn {
+			if !in[d] {
+				in[d] = true
+				queue = append(queue, d)
+			}
+		}
+	}
+	return in
+}
 
 // Stop 停止一个服务，不管它此刻处在什么状态。
 //
