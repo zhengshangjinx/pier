@@ -100,6 +100,24 @@ process group.
   toolchain Go itself downloads into `~/go/pkg/mod/golang.org/toolchain@*` counts too.
 - The "SDKs" page lets you add any directory by hand and set a global default per language.
 
+### Environment variables
+
+- A top-level **`env`** block in the manifest goes to every service; a service's own value for the
+  same name wins. One shared database address or registry config is one place to change, with no
+  service left behind pointing at the old one.
+- A **`.env`** in a service's directory is injected automatically, with dotenv's usual semantics:
+  fill in only what is missing (anything already in the process environment is left alone), one
+  layer of matching quotes stripped, `#` starts a comment but only on its own line (a `#` inside a
+  value stays). Only this one file is read — Pier does not guess between `.env.local`,
+  `.env.development` and friends. A file that can't be parsed stops the start and names the file
+  and line.
+- Values may reference **`${DB_HOST}`** from the environment as computed so far, and **`${PORT}`**
+  for the service's own port — the `PORT` injected at start is the same value a child process
+  reads. Values without a `$` are never rewritten; `$${X}` means a literal `${X}`.
+- **An unknown name is an error, not an empty value**: an empty string would look fine and connect
+  to nothing. The start log lists which variables were injected (names only). The GUI edits the
+  shared block under Preferences → Data.
+
 ### Logs
 
 - One directory per service, one file per day: `logs/<service>/<date>.log`, kept for 14 days.
@@ -152,11 +170,11 @@ process group.
 - Search and an "all / running / needs attention" filter; bulk start/stop follows the current page.
 - Log drawer, port occupancy (who holds it, kill it from there), and a defined way out when a
   health probe never passes.
-- Preferences has three sections: general (check / download / skip, the automatic-check switch),
-  appearance (light / dark / follow-system), and data. The data section says which manifest is in
-  hand — paste it out as YAML for `pier.yaml`, save it to a file, or open another manifest
-  read-only and switch back to local data at any time — and cleans up process records that no
-  longer match reality.
+- Preferences has three sections: general (check / download / skip, the automatic-check and
+  notification switches), appearance (light / dark / follow-system), and data. The data section
+  says which manifest is in hand — paste it out as YAML for `pier.yaml`, save it to a file, or
+  open another manifest read-only and switch back to local data at any time — edits the shared
+  environment variables, and cleans up process records that no longer match reality.
 
 The log drawer, SDK management, preferences and the dark theme (the rest are in
 [docs/images](docs/images/README.md)):
@@ -326,6 +344,10 @@ should read `missing` from `pier doctor --json`.
 toolchain:
   java: /opt/homebrew/opt/openjdk@21   # global default per language
 
+env:                                   # shared by every service; a service's own value wins
+  DB_HOST: 127.0.0.1
+  DB_PORT: "5432"
+
 services:
   - name: api
     dir: ./server            # relative to the manifest, or absolute (no ~)
@@ -334,7 +356,13 @@ services:
     port: 8080
     health: http://localhost:8080/actuator/health
     env:
-      SPRING_PROFILES_ACTIVE: dev
+      # Values may reference the environment as computed so far (the shared block, .env
+      # and the toolchain are all in it) or another variable in the same block;
+      # ${PORT} is this service's own port. The shared block cannot see a service's own
+      # variables — it is resolved first.
+      JDBC_URL: jdbc:postgresql://${DB_HOST}:${DB_PORT}/shop
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: "${PORT}"
 
   - name: web
     dir: ./web
@@ -345,6 +373,9 @@ services:
     depends_on: [api]        # api starts first, and stops last
     restart: on-failure      # bring it back when it disappears without going through Stop
 ```
+
+The two top-level keys apply to every service: `toolchain` sets a global default per language,
+`env` holds variables shared by all services (a service's own value wins).
 
 | Field | Meaning |
 | --- | --- |
@@ -358,7 +389,7 @@ services:
 | `script` | package.json script for Node services |
 | `port` | Port, used for status display and occupancy checks |
 | `health` | Readiness probe URL. It is a **readiness signal, not a verdict**: a service that never answers it is still running, and the state falls back with an explanation once the probe times out |
-| `env` | Extra environment variables |
+| `env` | Extra environment variables. Values may use `${NAME}` (from the environment as computed so far, including `.env` and the shared block) and `${PORT}` (this service's own port); an unknown name refuses the start instead of expanding to nothing |
 | `toolchain` | Per-service toolchain override, taking precedence over the top level |
 | `depends_on` | Services that must start first (a list). Ordering only, never a verdict: a service still starts when its dependency failed |
 | `restart` | Takes one value, `on-failure`: bring the process back when it disappears without going through Stop. Empty means no automatic restart |
@@ -370,7 +401,7 @@ Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=
 
 ```
 ~/.pier/
-├── services.json   services and groups (what the GUI edits)
+├── services.json   services, groups and shared environment variables (what the GUI edits)
 ├── settings.json   UI preferences (theme, automatic update checks, skipped versions),
 │                   manually added SDKs, global defaults
 ├── state.json      process state (PID / PGID) used to reclaim services

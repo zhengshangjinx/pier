@@ -135,10 +135,14 @@ type StateOut struct {
 	ConfigDir  string `json:"configDir"`
 	ConfigSrc  string `json:"configSource"`
 	// ReadOnly 表示这次用的是命令行指定的 YAML 清单，界面上的编辑入口要收起来。
-	ReadOnly  bool         `json:"readOnly"`
-	Groups    []GroupOut   `json:"groups"`
-	BusyCount int          `json:"busyCount"`
-	Services  []ServiceOut `json:"services"`
+	ReadOnly bool       `json:"readOnly"`
+	Groups   []GroupOut `json:"groups"`
+	// SharedEnv 是清单顶层那组共享给所有服务的变量。界面在「偏好设置 · 数据」
+	// 里编辑它——它属于这份清单，不属于某一个服务，而那一页是界面上唯一
+	// 能改清单本身的地方。
+	SharedEnv map[string]string `json:"sharedEnv,omitempty"`
+	BusyCount int               `json:"busyCount"`
+	Services  []ServiceOut      `json:"services"`
 	// UngroupedName 是内置的「未分组」名字。由后端给出而不是让界面写死，
 	// 免得将来改了名字界面上还留着旧的。
 	UngroupedName string `json:"ungroupedName"`
@@ -244,7 +248,7 @@ func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr 
 		cfgDir = filepath.Dir(cfg.Path)
 	}
 	out := StateOut{OK: true, ConfigPath: cfgPath, ConfigDir: cfgDir, ConfigSrc: cfgSrc,
-		ReadOnly: !cfg.IsStore(), UngroupedName: config.UngroupedName}
+		ReadOnly: !cfg.IsStore(), SharedEnv: cfg.Env, UngroupedName: config.UngroupedName}
 	if metricsErr != nil {
 		out.MetricsErr = metricsErr.Error()
 	} else {

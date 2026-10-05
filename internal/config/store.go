@@ -44,6 +44,8 @@ const storeVersion = 1
 type storeFile struct {
 	Version   int               `json:"version"`
 	Toolchain map[string]string `json:"toolchain,omitempty"`
+	// Env 是共享给所有服务的变量，与 YAML 清单顶层的 env 是同一个东西。
+	Env map[string]string `json:"env,omitempty"`
 	// Groups 是分组的展示顺序，空分组也靠它保留。成员仍然只看服务自己的 group 字段。
 	Groups   []string   `json:"groups"`
 	Services []*Service `json:"services"`
@@ -144,7 +146,7 @@ func LoadStore(path string) (*Config, error) {
 	root, _ := os.UserHomeDir()
 	d := dirsForStore(abs)
 	c := &Config{
-		Path: abs, Toolchain: sf.Toolchain, DeclaredGroups: sf.Groups,
+		Path: abs, Toolchain: sf.Toolchain, Env: sf.Env, DeclaredGroups: sf.Groups,
 		store: true, root: root,
 		logDir: d.Logs, binDir: filepath.Join(d.Cache, "bin"),
 		statePath: filepath.Join(d.Data, "state.json"),
@@ -175,7 +177,7 @@ func (c *Config) Save() error {
 	if err := c.validateServices(); err != nil {
 		return err
 	}
-	sf := storeFile{Version: storeVersion, Toolchain: c.Toolchain, Groups: c.DeclaredGroups, Services: c.Services}
+	sf := storeFile{Version: storeVersion, Toolchain: c.Toolchain, Env: c.Env, Groups: c.DeclaredGroups, Services: c.Services}
 	if sf.Groups == nil {
 		sf.Groups = []string{}
 	}
@@ -214,10 +216,14 @@ func ServiceYAML(s *Service) (string, error) {
 // 都读不回去的文件。空分组因此在导出时丢掉——这是已知的取舍，导出的是「服务」，
 // 一个没有任何服务的空分组本来也不带走什么。
 func (c *Config) ExportYAML() (string, error) {
+	// 顶层的 env 一并导出：它是清单的一部分，不带出去的话，「复制成 YAML」拿到的
+	// 那份贴到别的机器上会少掉所有共享变量，而那些变量在导出前的界面上是看不见的
+	// ——服务跑不起来，却找不到少在哪儿。
 	out := struct {
 		Toolchain map[string]string `yaml:"toolchain,omitempty"`
+		Env       map[string]string `yaml:"env,omitempty"`
 		Services  []*Service        `yaml:"services"`
-	}{Toolchain: c.Toolchain, Services: c.Services}
+	}{Toolchain: c.Toolchain, Env: c.Env, Services: c.Services}
 	raw, err := yaml.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("生成 YAML 失败：%w", err)
@@ -536,6 +542,7 @@ func EnsureStore(storePath string, yaml []string) (string, error) {
 		home, _ := os.UserHomeDir()
 		c := newStore(storePath, home)
 		c.Toolchain = src.Toolchain
+		c.Env = src.Env
 		for _, g := range src.AllGroups() {
 			c.AddGroup(g)
 		}

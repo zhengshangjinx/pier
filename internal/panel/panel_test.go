@@ -172,6 +172,15 @@ func TestStateFromStoreIsEditable(t *testing.T) {
 	if !h.find(t, "alpha").Editable {
 		t.Error("数据文件里的服务应当可编辑")
 	}
+
+	// 顶层那组共享变量也要跟着状态出去：界面「偏好设置 · 数据」里那一块编辑的就是它，
+	// 状态里没有的话，框里永远是空的，一保存就把用户原来写的全冲掉。
+	if _, err := h.p.Manager().SaveSharedEnv(map[string]string{"DB_HOST": "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.p.State().SharedEnv; got["DB_HOST"] != "127.0.0.1" {
+		t.Errorf("状态里的共享变量 = %v，想要 DB_HOST=127.0.0.1", got)
+	}
 }
 
 func TestStateCarriesFieldsTheEditFormNeeds(t *testing.T) {

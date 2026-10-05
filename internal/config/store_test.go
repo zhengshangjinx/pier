@@ -138,6 +138,77 @@ func TestStoreEditRoundTrip(t *testing.T) {
 	}
 }
 
+// 清单顶层的 env 是共享给所有服务的，它得活过每一次「读—改—写」。
+//
+// 界面保存时只握着某一个服务，写回若把它丢了，用户会看到所有服务同时连错地址，
+// 而清单里已经找不到那条设置——这个失败没有任何提示，所以每一步都钉住。
+func TestStoreKeepsSharedEnv(t *testing.T) {
+	store := filepath.Join(t.TempDir(), StoreName)
+	src := writeManifest(t, `
+env:
+  DB_HOST: 127.0.0.1
+  DB_PORT: "5432"
+  SAY: 来自共享
+services:
+  - name: alpha
+    dir: a
+    kind: go
+    env:
+      SAY: 自己的
+`, "")
+	if _, err := EnsureStore(store, []string{src}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := LoadStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 导入时就该带上：它是清单的一部分，不是某一个服务的属性。
+	if len(c.Env) != 3 || c.Env["DB_HOST"] != "127.0.0.1" || c.Env["DB_PORT"] != "5432" {
+		t.Fatalf("导入后的共享变量不对：%v", c.Env)
+	}
+
+	// 只改一个服务再写回——界面上的每一次保存都是这个形状。
+	svc, err := c.Find("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.Port = 8080
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	back, err := LoadStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Env) != 3 || back.Env["DB_HOST"] != "127.0.0.1" || back.Env["SAY"] != "来自共享" {
+		t.Errorf("写回之后共享变量没了或变了：%v", back.Env)
+	}
+	// 服务自己那一段不能被共享段顶掉：它是覆盖共享的那一层。
+	a, err := back.Find("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Port != 8080 || a.Env["SAY"] != "自己的" {
+		t.Errorf("服务自己的字段不对：端口 %d，env %v", a.Port, a.Env)
+	}
+
+	// 导出的 YAML 也要带着它：那份文件是给人拿去改、拿去别处跑的。
+	text, err := back.ExportYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(writeManifest(t, text, ""))
+	if err != nil {
+		t.Fatalf("导出的清单读不回来：%v\n%s", err, text)
+	}
+	if len(again.Env) != 3 || again.Env["DB_HOST"] != "127.0.0.1" {
+		t.Errorf("导出再读回来时共享变量不对：%v\n%s", again.Env, text)
+	}
+}
+
 // 拖动排序只动给出的那几个名字占着的位置，别处一个都不许动。
 //
 // 这是「在分组页 / 筛选之后拖动」那个场景的地基：界面手里只有看得见的那几行，

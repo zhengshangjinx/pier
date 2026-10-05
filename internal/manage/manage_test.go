@@ -149,6 +149,11 @@ func TestWriteOpsNeverTouchBaseManifest(t *testing.T) {
 	}
 	h.assertBaseUntouched()
 
+	if _, err := h.m.SaveSharedEnv(map[string]string{"DB_HOST": "127.0.0.1"}); err != nil {
+		t.Fatalf("保存共享环境变量失败：%v", err)
+	}
+	h.assertBaseUntouched()
+
 	if _, err := h.m.DeleteService("alpha"); err != nil {
 		t.Fatalf("删除服务失败：%v", err)
 	}
@@ -1095,6 +1100,66 @@ func TestExportYAMLComesFromManifest(t *testing.T) {
 	h.assertBaseUntouched()
 }
 
+// ── 共享环境变量 ───────────────────────────────────────────────────────────
+
+// 共享变量整份替换、存进数据文件、换来一次重新加载，清空之后整段消失。
+func TestSaveSharedEnv(t *testing.T) {
+	h := newHarness(t)
+	before := h.reloads
+
+	msg, err := h.m.SaveSharedEnv(map[string]string{"DB_HOST": "127.0.0.1", "DB_PORT": "5432"})
+	if err != nil {
+		t.Fatalf("保存失败：%v", err)
+	}
+	if !strings.Contains(msg, "2") {
+		t.Errorf("回话该说清存了几条，得到 %q", msg)
+	}
+	if h.reloads <= before {
+		t.Error("保存之后没有重新加载，界面与命令行还是旧的那份")
+	}
+	if got := h.onDisk().Env; len(got) != 2 || got["DB_HOST"] != "127.0.0.1" {
+		t.Errorf("数据文件里的共享变量不对：%v", got)
+	}
+	// 服务自己的 env 与共享段是两处，改一处不该动另一处。
+	if _, err := h.m.SaveService(ServiceIn{Name: "alpha", Dir: "a", Kind: "go",
+		Env: map[string]string{"OWN": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.onDisk().Env; len(got) != 2 {
+		t.Errorf("保存服务把共享段弄丢了：%v", got)
+	}
+
+	// 整份替换：第二次只写一条，前一条就该没了——界面上那个框里就是全部。
+	if _, err := h.m.SaveSharedEnv(map[string]string{"DB_HOST": "10.0.0.9"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.onDisk().Env; len(got) != 1 || got["DB_HOST"] != "10.0.0.9" {
+		t.Errorf("整份替换之后应当是仅剩一条：%v", got)
+	}
+
+	// 一条不剩就整个去掉，不留一个空对象。
+	if _, err := h.m.SaveSharedEnv(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.onDisk().Env; len(got) != 0 {
+		t.Errorf("清空之后不该还有：%v", got)
+	}
+	h.assertBaseUntouched()
+}
+
+// ${} 只认得出合法变量名，收下一个做不到的名字，等于答应了一件谁也没法兑现的事。
+func TestSaveSharedEnvRejectsBadName(t *testing.T) {
+	h := newHarness(t)
+	for _, name := range []string{"A-B", "1A", "", "A B"} {
+		if _, err := h.m.SaveSharedEnv(map[string]string{name: "1"}); err == nil {
+			t.Errorf("%q 不该被收下", name)
+		}
+	}
+	if len(h.onDisk().Env) != 0 {
+		t.Error("被拒的那几次不该写进数据文件")
+	}
+}
+
 // ── 没清单时一律拒绝 ───────────────────────────────────────────────────────
 
 // 清单没加载出来时，每个需要清单的动作都必须拒绝，而不是拿着 nil 往下走。
@@ -1121,6 +1186,10 @@ func TestEveryMethodRefusesWithoutConfig(t *testing.T) {
 		{"候选端口", func() error { _, err := m.PortCandidates(""); return err }},
 		{"复制服务 YAML", func() error { _, err := m.ServiceYAML("x"); return err }},
 		{"导出清单", func() error { _, err := m.ExportYAML(); return err }},
+		{"保存共享环境变量", func() error {
+			_, err := m.SaveSharedEnv(map[string]string{"A": "1"})
+			return err
+		}},
 	}
 
 	for _, tc := range cases {

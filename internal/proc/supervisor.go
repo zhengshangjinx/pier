@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,7 +155,7 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 	if err != nil {
 		return failEarly(err)
 	}
-	env, err := s.buildEnv(svc, plan)
+	env, envNote, err := s.buildEnv(svc)
 	if err != nil {
 		return failEarly(err)
 	}
@@ -167,6 +168,11 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 				fmt.Fprintf(logFile, "!!! %s\n", t.Warn)
 			}
 		}
+	}
+	// 环境也是「为什么是这个结果」的一部分：一个变量可能有四个来源，出问题时
+	// 第一个要问的就是它到底从哪儿来的。这里只写名字——值常常是密钥。
+	if envNote != "" {
+		fmt.Fprintf(logFile, "--- %s\n", envNote)
 	}
 	// 把命令名固化成绝对路径，避免受 Pier 自身 PATH 的影响。
 	// 只替换执行用的副本，plan 保留原样，日志与状态里展示的命令才可读。
@@ -388,9 +394,6 @@ func (s *Supervisor) Status() ([]Status, error) {
 	return out, nil
 }
 
-// buildEnv 组装服务的运行环境：先注入所需工具链，再叠加服务自定义变量。
-// 注入 JAVA_HOME 是关键一步——本机 PATH 里 /usr/bin/java 是 macOS 的占位桩，
-// 会遮蔽 sdkman 的真 JDK，导致 mvn 报 "Unable to locate a Java Runtime"。
 // ResetToolchains 丢掉已解析的工具链，下次按最新的设置与磁盘重新选。
 // 「SDK 管理」里改了默认、加减了 SDK 之后调用。
 func (s *Supervisor) ResetToolchains() {
@@ -421,11 +424,25 @@ func (s *Supervisor) Tools(svc *config.Service) ([]*toolchain.Tool, *config.Plan
 	return out, plan, nil
 }
 
-func (s *Supervisor) buildEnv(svc *config.Service, plan *config.Plan) ([]string, error) {
+// buildEnv 组装服务的运行环境，第二项是写进启动日志的一句说明（没什么可说时为空）。
+//
+// 注入 JAVA_HOME 是关键一步——本机 PATH 里 /usr/bin/java 是 macOS 的占位桩，
+// 会遮蔽 sdkman 的真 JDK，导致 mvn 报 "Unable to locate a Java Runtime"。
+//
+// 叠加顺序从低到高，每一层的位置都是有理由的：
+//
+//	继承来的环境 → 工具链（JAVA_HOME、PATH）→ .env → PORT → 清单顶层 env → 服务自己的 env
+//
+// .env 排在工具链之后：界面上写着「将使用某一套 JDK」，不该被服务目录里一个
+// JAVA_HOME 悄悄改掉，那样界面就在说一件与事实不符的话。排在清单之前则相反——
+// 清单是 Pier 自己的配置，用户在那儿明写的值应当比项目里那份文件更算数。
+// .env 只补缺、不覆盖任何已有的键（照 dotenv 的通行做法）：它同时也是别的工具
+// 在用的文件，谁先设置谁赢这条规矩，用户从别的工具那边已经熟悉了。
+func (s *Supervisor) buildEnv(svc *config.Service) ([]string, string, error) {
 	env := os.Environ()
 	tools, _, err := s.Tools(svc)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// PATH 按工具顺序依次前置，互不覆盖：Java 的 bin 和 Maven 的 bin 都得在上面。
 	var pathDirs []string
@@ -437,13 +454,118 @@ func (s *Supervisor) buildEnv(svc *config.Service, plan *config.Plan) ([]string,
 		env = mergeEnv(env, []string{"PATH=" + strings.Join(append(pathDirs, os.Getenv("PATH")), string(os.PathListSeparator))})
 	}
 
-	custom := make([]string, 0, len(svc.Env))
-	for k, v := range svc.Env {
-		custom = append(custom, k+"="+v)
+	dotenv, err := config.LoadEnvFile(filepath.Join(svc.AbsDir(), config.EnvFileName))
+	if err != nil {
+		return nil, "", err
 	}
-	// map 遍历顺序随机，排序后再合并，保证每次启动环境一致、日志可比对。
-	sort.Strings(custom)
-	return mergeEnv(env, custom), nil
+	var added, kept []string
+	env, added, kept = applyDotenv(env, dotenv)
+
+	// 清单里写了端口就注入成 PORT。这样 ${PORT} 与子进程读到的 PORT 是同一个值：
+	// 只从「用户自己写过的变量」里找的话，清单上明明写着 port: 3000，
+	// ${PORT} 却是空的——而服务本来就该监听 3000。
+	if svc.Port != 0 {
+		env = mergeEnv(env, []string{"PORT=" + strconv.Itoa(svc.Port)})
+	}
+
+	// 清单里那两段允许写 ${}，从上面已经算好的环境里取（含 .env 与工具链变量），
+	// 同一段内部还能互相引用。共享段先解，服务那段解的时候看得见共享段的结果。
+	for _, layer := range []struct {
+		what string
+		vals map[string]string
+	}{
+		{"共享环境变量", s.cfg.Env},
+		{"环境变量", svc.Env},
+	} {
+		resolved, err := config.ResolveEnvLayer(config.EnvList(layer.vals), lookupEnv(env))
+		if err != nil {
+			return nil, "", fmt.Errorf("服务 %s 的%s：%w", svc.Name, layer.what, err)
+		}
+		env = mergeEnv(env, envStrings(resolved))
+	}
+	return env, dotenvNote(added, kept), nil
+}
+
+// applyDotenv 把 .env 里的变量补进环境，只补缺、已有的一个不动。
+//
+// 另外返回真正注入的与被跳过的名字，供日志用：值一律不进日志（那里面常常是密钥，
+// 而日志是会被截图发出去的东西），名字不泄密，却能回答「这个变量是从哪儿来的」，
+// 以及更常见的那个问题——「我明明改了 .env，怎么没生效」。
+func applyDotenv(env []string, kv []config.EnvKV) (out, added, kept []string) {
+	// 同名以最后一条为准（与 dotenv 一致），排序是为了日志每次一样。
+	value := make(map[string]string, len(kv))
+	order := make([]string, 0, len(kv))
+	for _, e := range kv {
+		if _, dup := value[e.Key]; !dup {
+			order = append(order, e.Key)
+		}
+		value[e.Key] = e.Value
+	}
+	sort.Strings(order)
+
+	idx := make(map[string]int, len(env))
+	for i, e := range env {
+		if eq := strings.IndexByte(e, '='); eq > 0 {
+			idx[e[:eq]] = i
+		}
+	}
+	out = env
+	for _, k := range order {
+		if _, exists := idx[k]; exists {
+			kept = append(kept, k)
+			continue
+		}
+		idx[k] = len(out)
+		out = append(out, k+"="+value[k])
+		added = append(added, k)
+	}
+	return out, added, kept
+}
+
+// dotenvNote 写启动日志里那一行「.env 干了什么」。两样都没有就不写这一行，
+// 大多数服务目录里没有 .env，那种情况下日志里不该多出一条什么都没说的记录。
+func dotenvNote(added, kept []string) string {
+	if len(added) == 0 && len(kept) == 0 {
+		return ""
+	}
+	// 被跳过的那些一定要说出来：用户改了 .env 而环境里恰好有同名的键时，
+	// 服务拿到的仍是旧值，日志里若只说「注入了什么」，看起来就像是成功了。
+	var parts []string
+	if len(added) > 0 {
+		parts = append(parts, "注入 "+strings.Join(added, "、"))
+	} else {
+		parts = append(parts, "没有可注入的")
+	}
+	if len(kept) > 0 {
+		parts = append(parts, strings.Join(kept, "、")+" 已有值没覆盖")
+	}
+	return ".env " + strings.Join(parts, "；") + "（只写名字，不写值）"
+}
+
+// lookupEnv 把一份 []string 形式的环境包成 ResolveEnvLayer 要的查表函数。
+func lookupEnv(env []string) func(string) (string, bool) {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			m[kv[:eq]] = kv[eq+1:]
+		}
+	}
+	return func(name string) (string, bool) {
+		v, ok := m[name]
+		return v, ok
+	}
+}
+
+// envStrings 把展开好的变量摊成 exec 要的 KEY=VALUE。
+func envStrings(kv []config.EnvKV) []string {
+	if len(kv) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(kv))
+	for _, e := range kv {
+		out = append(out, e.Key+"="+e.Value)
+	}
+	return out
 }
 
 // mergeEnv 把 overrides 合并进 base，同名键以 overrides 为准。

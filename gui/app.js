@@ -260,6 +260,12 @@
       configDir: demoReadOnly ? "/Users/you/Desktop" : "/Users/you/.pier",
       configSource: demoReadOnly ? (demoReadOnlySrc || "手动指定") : "本机数据",
       readOnly: demoReadOnly,
+      // 只读那份是 YAML，界面上的编辑入口整个收起（连读都不读），所以这里也给空：
+      // 摆一份「服务看得见、却一改就报错」的数据，只会让核对排版的人去查后端。
+      sharedEnv: demoReadOnly ? null : {
+        DB_HOST: "127.0.0.1", DB_PORT: "5432",
+        KAFKA_BROKERS: "127.0.0.1:9092", SPRING_PROFILES_ACTIVE: "local"
+      },
       ungroupedName: "未分组",
       // 分组用量是组内服务相加的结果，这里的数字必须真的加起来对得上：
       // 演示数据是用来核对排版的，界面上摆一份自相矛盾的数据，核对的人
@@ -751,6 +757,7 @@
   // 而折线的每个转角都被 Ico 的 stroke-linejoin 磨圆，正好是齿轮的样子。
   var IconGear = function (p) { return html`<${Ico} ...${p}><path d="M14.5 8l-2.25 1.76.28 2.83-2.77-.33L8 14.5l-1.76-2.24-2.77.33.28-2.83L1.5 8l2.25-1.76-.28-2.83 2.77.33L8 1.5l1.76 2.24 2.77-.33-.28 2.83z"/><circle cx="8" cy="8" r="2.2"/><//>`; };
   var IconDownload = function (p) { return html`<${Ico} ...${p}><path d="M8 2.2v7.4"/><path d="M4.9 6.8L8 9.9l3.1-3.1"/><path d="M2.6 11.2v1.7a1.5 1.5 0 0 0 1.5 1.5h7.8a1.5 1.5 0 0 0 1.5-1.5v-1.7"/><//>`; };
+  var IconCheck = function (p) { return html`<${Ico} ...${p}><path d="M3 8.4l3.3 3.3L13 4.6"/><//>`; };
 
   // 品牌标记：和应用图标（tools/mkicon）同一套几何，改动时两处一起对。
   //
@@ -1887,6 +1894,11 @@
     shell: { run: "如 ./start.sh", build: "如 ./build.sh", env: "APP_ENV=dev" }
   };
   var ADV_HINT_DEFAULT = { run: "如 ./start.sh", build: "如 make build", env: "APP_ENV=dev" };
+
+  // 共享环境变量那一段说明。${...} 只能写在引号里再插进来：它直接摆进
+  // html`` 模板的话会被当成插值，那一块（连同整页）当场渲染不出来。
+  var ENV_HINT_TEXT = "值里可以引用别的变量（写成 ${NAME}），服务自己的端口用 ${PORT} 取；"
+    + "两者都在启动时从已经算好的环境里展开，取不到就停在启动之前并说明原因。";
 
   // 下拉框（分组、类型）的空值用 undefined 而不是空串：空串会被当成「选中了一个空选项」，
   // 占位文字「未分组」「自动识别」就不显示了，看着像控件坏了。
@@ -3395,6 +3407,35 @@
     var cfgReadOnly = !!(data && data.readOnly);
     var cfgPath = (data && data.configPath) || "";
     var cfgDir = (data && data.configDir) || "";
+
+    // 共享变量的编辑区。初值只取一次，之后框里就是用户手里那一份——跟着 data 走的话，
+    // 每几秒一次的状态刷新会在打字中间把内容冲掉。
+    var es = React.useState(function () { return envToText(data && data.sharedEnv); });
+    var envText = es[0], setEnvText = es[1];
+    // 后端存下来的那一份，用来在保存之后把框里的内容换成同一个样子（注释、空行、
+    // 顺序都归一）：框里留着一种写法、清单里存着另一种，下次打开会像被人改过。
+    var envSaved = envToText(data && data.sharedEnv);
+    // 初值只有那一次，而首次渲染时状态常常还没取回来（手快一点就赶上了），
+    // 那时框里是空的——等 data 到了它也不会自己补上，看着就像「一条都没有」，
+    // 按一下保存正好把用户原来的全冲掉。所以还停在后端上一次给的那份时跟着后端走，
+    // 用户一动过（框里已经与那份不同）就不再跟。
+    var envSeen = React.useRef("");
+    React.useEffect(function () {
+      if (envText === envSeen.current) setEnvText(envSaved);
+      envSeen.current = envSaved;
+    }, [envSaved]);
+
+    var saveEnv = async function () {
+      var want = textToEnv(envText);
+      setBusy("env");
+      try {
+        await call("saveSharedEnv", JSON.stringify({ env: want }));
+        setEnvText(envToText(want));
+        props.message.success("已保存 " + Object.keys(want).length + " 条共享环境变量");
+      } catch (ex) { props.message.error(ex.message); }
+      setBusy("");
+      props.refresh();
+    };
     // 只读时写文件名，本机数据时写「本机数据」：一个是「这份 YAML」，一个是
     // 「你自己那套」，指名的说法不一样。取文件名要按 / 切，清单路径一律是绝对路径。
     var cfgName = cfgReadOnly ? cfgPath.split("/").pop() : "本机数据";
@@ -3459,6 +3500,24 @@
             }}>回到本机数据<//>` : null}
         <//>
       </section>
+
+      ${"" /* 共享变量属于这份清单：它跟着清单一起被导出、一起被换掉，所以摆在这一栏；
+             只读时整块收起——YAML 那份改不了，摆一个写不进去的框比不摆更坏。 */}
+      ${cfgReadOnly ? null : html`<section className="dc-card">
+        <div className="dc-card-head">
+          <span className="dc-card-title">共享环境变量</span>
+          <span className="dc-card-sub">所有服务都会拿到，服务自己的同名变量覆盖它</span>
+        </div>
+        <${A.Input.TextArea} value=${envText} className="dc-mono" spellCheck=${false}
+          autoSize=${{ minRows: 3, maxRows: 10 }}
+          onChange=${function (ev) { setEnvText(ev.target.value); }}
+          placeholder=${"一行一个 KEY=VALUE，# 开头为注释\n如 DB_HOST=127.0.0.1"}/>
+        <${A.Space} className="dc-set-acts">
+          <${A.Button} type="primary" icon=${e(IconCheck)} loading=${busy === "env"}
+            disabled=${envText === envSaved} onClick=${saveEnv}>保存<//>
+        <//>
+        <div className="dc-set-hint" style=${sm}>${ENV_HINT_TEXT}</div>
+      </section>`}
 
       <section className="dc-card">
         <div className="dc-card-head">

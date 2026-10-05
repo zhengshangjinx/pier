@@ -153,6 +153,8 @@ func (a *app) bindings() []binding {
 		{"pierCreateGroup", a.createGroup},
 		{"pierRenameGroup", a.renameGroup},
 		{"pierDeleteGroup", a.deleteGroup},
+		// 清单顶层那组共享给所有服务的变量（「偏好设置 · 数据」里编辑）
+		{"pierSaveSharedEnv", a.saveSharedEnv},
 		// 分享与迁移：把清单变成一段能带走的文字，或者换一份清单来用
 		{"pierServiceYAML", a.serviceYAML},
 		{"pierConfigYAML", a.configYAML},

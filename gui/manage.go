@@ -69,6 +69,22 @@ func (a *app) saveService(payload string) string {
 	return okJSON(msg)
 }
 
+// saveSharedEnv 收的是界面那块多行文本解析出来的对象（见 app.js 的 textToEnv），
+// 与 saveService 一样，解析留在这一层，业务层只看见成形的字段。
+func (a *app) saveSharedEnv(payload string) string {
+	var in struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(payload), &in); err != nil {
+		return errJSON("提交的内容无法解析：" + err.Error())
+	}
+	msg, err := a.mgr.SaveSharedEnv(in.Env)
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	return okJSON(msg)
+}
+
 func (a *app) deleteService(name string) string {
 	msg, err := a.mgr.DeleteService(name)
 	if err != nil {

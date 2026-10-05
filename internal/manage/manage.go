@@ -596,6 +596,41 @@ func (m *Manager) ExportYAML() (string, error) {
 	return cfg.ExportYAML()
 }
 
+// ── 共享环境变量 ───────────────────────────────────────────────────────────
+//
+// 顶层那组变量是这份清单的属性，不是某一个服务的：改一处，所有服务下次启动
+// 都拿到新的值。
+
+// SaveSharedEnv 整份覆盖清单顶层的共享变量。
+//
+// 整份替换而不是逐条增删：界面上它就是一块多行文本，用户按下保存时手里拿的是
+// 他自己写的那一整份。逐条合并的话，「删掉一行」与「他压根没写这一行」在数据上
+// 长得一模一样，而这两种意图的结果正好相反。
+func (m *Manager) SaveSharedEnv(env map[string]string) (string, error) {
+	st, err := m.storeFor()
+	if err != nil {
+		return "", err
+	}
+	// 名字当场校验：${} 只认 [A-Za-z_][A-Za-z0-9_]*，收下一个做不到的名字，
+	// 等于答应了一件谁也没法兑现的事——写的人要到启动失败时才知道。
+	for k := range env {
+		if !config.ValidEnvName(k) {
+			return "", fmt.Errorf("%s 不能当变量名（只能用字母、数字、下划线，且不以数字开头）", k)
+		}
+	}
+	if len(env) == 0 {
+		env = nil // 一条不剩就整段去掉，数据文件里不留一个空对象
+	}
+	st.Env = env
+	if err := m.commit(st); err != nil {
+		return "", err
+	}
+	if env == nil {
+		return "已清空共享环境变量", nil
+	}
+	return fmt.Sprintf("已保存 %d 条共享环境变量，服务下次启动时生效", len(env)), nil
+}
+
 // ── 改名与复制 ─────────────────────────────────────────────────────────────
 
 // RenameService 给一个服务改名。

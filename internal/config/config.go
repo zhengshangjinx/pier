@@ -100,6 +100,11 @@ type Config struct {
 	Path string `yaml:"-"`
 	// Toolchain 按工具类别指定绝对路径或 sdkman 候选版本名，如 java: "17.0.12-oracle"。
 	Toolchain map[string]string `yaml:"toolchain"`
+	// Env 是所有服务都会拿到的共享变量，服务自己的 env 覆盖它。
+	//
+	// 一组服务共用同一个数据库地址、同一套注册中心配置是常态，写在每个服务下面
+	// 意味着改一处要改十几处，而漏掉的那个服务会用着旧地址连上去。
+	Env map[string]string `yaml:"env" json:"env,omitempty"`
 	// Services 是服务定义列表，顺序即面板与 status 的展示顺序。
 	// 这是 pier.yaml 与覆盖文件合并之后的结果。
 	Services []*Service `yaml:"services"`
