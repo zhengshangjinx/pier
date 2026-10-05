@@ -17,7 +17,11 @@ import (
 // 只读、不落盘。纳管要经过表单确认，那是界面的事——照目录推出来的启动方式
 // 只对「一个目录一个服务」的项目成立，直接写进清单会留下一条要人去删的错记录。
 func cmdPorts(args []string) int {
-	cfgPath, _ := extractConfig(args)
+	cfgPath, rest := extractConfig(args)
+	jsonOut, rest := extractJSON(rest)
+	if err := noExtra("ports", rest); err != nil {
+		return fail("%v", err)
+	}
 	cfg, _, err := setup(cfgPath)
 	if err != nil {
 		return fail("%v", err)
@@ -28,6 +32,15 @@ func cmdPorts(args []string) int {
 	out, err := m.ScanPorts()
 	if err != nil {
 		return fail("%v", err)
+	}
+	if jsonOut {
+		// 扫不动也照样输出：PortScanOut 上本来就有 ok 与 msg 两格，
+		// 脚本读那两格比读一屏中文再猜要准。退出码仍然非 0——没扫成就是没扫成。
+		printJSON(out)
+		if !out.OK {
+			return 1
+		}
+		return 0
 	}
 	// 扫不动和「扫出来是空的」必须分开说：lsof 不在的时候空表看着就像
 	// 「本机什么也没在跑」，那是个和事实相反、又看不出哪里不对的结论。

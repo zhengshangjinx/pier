@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/zhengshangjinx/pier/internal/config"
+	"github.com/zhengshangjinx/pier/internal/diag"
 	"github.com/zhengshangjinx/pier/internal/manage"
 	"github.com/zhengshangjinx/pier/internal/panel"
 	"github.com/zhengshangjinx/pier/internal/proc"
@@ -790,6 +791,9 @@ func TestUIFieldNamesExistInBackend(t *testing.T) {
 		// 上没有的那个 result 键——所以界面里先把它取出来叫 res（见 SettingsPage）。
 		{[]string{"up"}, keysOf(update.StatusOut{}), "更新状态"},
 		{[]string{"res"}, keysOf(update.ApplyResult{}), "更新结果"},
+		// 服务行下面那句诊断。它同样嵌在服务里，得单列一个变量名：
+		// 写成 s.diag.reason 的话，比对的是 ServiceOut 上没有的 reason 键。
+		{[]string{"dg"}, keysOf(diag.Hit{}), "诊断"},
 	}
 
 	for _, tg := range targets {
@@ -921,8 +925,8 @@ func TestOutputStructsTagEveryField(t *testing.T) {
 		"manage.SDKItemOut": manage.SDKItemOut{}, "manage.SDKAddOut": manage.SDKAddOut{},
 		"manage.ToolchainOut": manage.ToolchainOut{},
 		"proc.PortOwner":      proc.PortOwner{}, "proc.Listener": proc.Listener{},
-		"proc.ToolInfo":       proc.ToolInfo{},
-		"update.StatusOut":    update.StatusOut{}, "update.ApplyResult": update.ApplyResult{},
+		"proc.ToolInfo":    proc.ToolInfo{},
+		"update.StatusOut": update.StatusOut{}, "update.ApplyResult": update.ApplyResult{},
 	}
 	names := make([]string, 0, len(structs))
 	for n := range structs {

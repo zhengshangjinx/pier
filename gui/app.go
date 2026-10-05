@@ -45,13 +45,23 @@ type app struct {
 	// 只有「重启并安装」走到最后会用它：绑定先返回「更新已安排」，页面把这句话
 	// 显示出来之后再关。
 	quit func() error
+	// notify 把一条通知交给系统（各平台一份，见 notify_<平台>.go）。
+	//
+	// 做成字段是为了能换掉：这一条真跑起来会弹出一个横幅，而用例要验的是
+	// 「开关关掉之后还发不发」——那是判断，不是平台动作本身。
+	// 只在 newApp 里写一次，之后只读（调用它的那条协程读的也是这个值）。
+	notify func(title, body string) error
 }
 
 func newApp(flagPath string) *app {
 	a := &app{
-		panel: panel.New(),
-		up:    update.NewSession(update.New(update.Options{})),
+		panel:  panel.New(),
+		up:     update.NewSession(update.New(update.Options{})),
+		notify: sendNotify,
 	}
+	// 服务出事时叫一声（见 panel.say）。命令行与 pier api 挂的是同一个内核，
+	// 但它们没有地方弹通知，也不该弹——只有界面这一份装上。
+	a.panel.SetUserNotify(a.notifyService)
 	a.mgr = a.panel.Manager()
 
 	path, src, err := config.Resolve(flagPath)
@@ -64,6 +74,28 @@ func newApp(flagPath string) *app {
 		a.panel.SetLoadError(err.Error())
 	}
 	return a
+}
+
+// notifyService 弹一条系统通知，偏好里关掉时什么都不做。
+//
+// 开关每次现读一遍 settings.json：偏好是另一个进程外的文件，缓存一份就得再想
+// 「什么时候该失效」，而这件事一天也发生不了几次，读一次文件是最省心的答案。
+//
+// **必须立刻返回**：调用它的是巡检那条协程（每三秒跑一遍），而弹一条通知要
+// 起一个进程（osascript / powershell），慢起来是几百毫秒——压在这儿就等于
+// 让整个巡检跟着一起等。所以真正发的那一下另起一条协程，失败了也不说：
+// 用户关掉通知权限、机器上没装 notify-send，都不是 Pier 坏了。
+func (a *app) notifyService(title, body string) {
+	if !config.DefaultSettings().Notify {
+		return
+	}
+	fn := a.notify
+	if fn == nil {
+		return
+	}
+	go func() {
+		_ = fn(title, body)
+	}()
 }
 
 // binding 是一个暴露给界面的后端入口。
@@ -338,6 +370,7 @@ func boolText(v bool) string {
 type settingsPatch struct {
 	Theme       *string `json:"theme"`
 	UpdateCheck *bool   `json:"updateCheck"`
+	Notify      *bool   `json:"notify"`
 }
 
 // saveSettings 保存界面偏好，接一个 JSON 对象（{"theme":"dark"} / {"updateCheck":false}）。
@@ -363,6 +396,9 @@ func (a *app) saveSettings(patch string) string {
 		}
 		if in.UpdateCheck != nil {
 			s.UpdateCheck = *in.UpdateCheck
+		}
+		if in.Notify != nil {
+			s.Notify = *in.Notify
 		}
 	})
 	if err != nil {

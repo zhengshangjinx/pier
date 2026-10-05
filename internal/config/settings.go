@@ -40,6 +40,14 @@ type Settings struct {
 	// UpdateSkipped 是用户点名跳过的版本号（如 0.3.0），空表示没跳过谁。
 	// 跳过是偏好，放这儿；「上次查到什么」是状态，放 update.json，两边不重复记。
 	UpdateSkipped string `json:"updateSkipped,omitempty"`
+
+	// Notify 是「服务出事时弹系统通知」开关，默认开。
+	//
+	// 与 UpdateCheck 同理，不加 omitempty：关掉之后要写进文件的是那个 false。
+	//
+	// 默认开是因为它只在真出事时响（异常退出、重启到上限、启动失败）：
+	// 一个天天在跑的服务崩了，用户多半不在终端面前，而这件事只有通知能追到他。
+	Notify bool `json:"notify"`
 }
 
 // SettingsPath 返回默认数据目录下的偏好文件路径。
@@ -58,7 +66,7 @@ func SettingsPath() (string, error) {
 // JSON 里没有的键不会覆盖已有的值——老用户的 settings.json 里没有 updateCheck，
 // 读出来就是这里的 true。
 func defaultSettings() Settings {
-	return Settings{Theme: "system", UpdateCheck: true}
+	return Settings{Theme: "system", UpdateCheck: true, Notify: true}
 }
 
 // LoadSettings 读取偏好；文件不存在时返回默认值，不算错误。

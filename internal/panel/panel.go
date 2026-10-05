@@ -21,10 +21,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhengshangjinx/pier/internal/config"
+	"github.com/zhengshangjinx/pier/internal/diag"
 	"github.com/zhengshangjinx/pier/internal/manage"
 	"github.com/zhengshangjinx/pier/internal/proc"
 )
@@ -59,6 +62,11 @@ type job struct {
 	kind string // start / stop / restart
 	svc  *config.Service
 	op   *operation
+	// auto 为真表示这次是巡检自己排的（见 enqueueRestart），不是用户点的。
+	//
+	// 只影响「起不来的时候要不要发系统通知」：用户点的那一下，他正看着屏幕，
+	// 界面上已经写着为什么没起来；巡检排的那一次没人在看，不说就没人知道。
+	auto bool
 }
 
 // operation 是某个服务身上正在进行的动作。
@@ -73,11 +81,20 @@ type operation struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	started chan struct{}
+	// id 是这把操作自己的编号，只用来给通知去重（见 opKey）。
+	// 不用指针当编号：同一个地址会被后来的分配复用，两次不同的失败就可能被认成同一次。
+	id uint64
 }
+
+// opSeq 发号。进程内单调递增，不复用。
+var opSeq atomic.Uint64
 
 func newOp(kind, phase string) *operation {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &operation{kind: kind, phase: phase, ctx: ctx, cancel: cancel, started: make(chan struct{})}
+	return &operation{
+		kind: kind, phase: phase, ctx: ctx, cancel: cancel,
+		started: make(chan struct{}), id: opSeq.Add(1),
+	}
 }
 
 // opLabels 把「动作 + 阶段」翻成界面文案。
@@ -96,6 +113,16 @@ func (o *operation) label() string {
 		return l
 	}
 	return o.kind
+}
+
+// opInfo 把动作翻成快照里那一组字段。失败态不显示动作、只留原因，
+// 这条判断留在这里就够，别让快照的组装知道 phase 有哪几个值。
+func (o *operation) opInfo() OpInfo {
+	info := OpInfo{Label: o.label(), Kind: o.kind}
+	if o.phase == "error" {
+		info.Err = o.err
+	}
+	return info
 }
 
 // Panel 是面板内核。
@@ -141,6 +168,30 @@ type Panel struct {
 	// 里非阻塞地丢一个信号，让宿主自己的循环去取状态。
 	notify func()
 
+	// userNotify 是给用户看的系统通知（标题 + 正文），只在真出事时响一次：
+	// 服务自己没了、启动失败、自动重启到上限。
+	//
+	// 与上面那个 notify 分开：那个是宿主的刷新信号，每两秒都在响，长什么样
+	// 由宿主自己决定；这个直接是给用户的一句话。命令行、pier api 这些宿主不装它
+	// （传 nil 就是不发），它们背后没有「用户此刻正在哪儿」可言，
+	// 弹一条系统通知只会莫名其妙。
+	//
+	// 调用规则与 notify 一样：由 worker 或巡检协程调用，实现必须立刻返回。
+	// 起一个子进程去弹通知（osascript、PowerShell）要半秒，那半秒不该堵住
+	// 启停队列，也不该拖慢巡检——所以真正的动作留给宿主自己去开协程。
+	userNotify func(title, body string)
+
+	// told 记着每一件事最近通知到哪一次了，键是「服务名 + 用途」，值是这件事的标识
+	// （见 crashKey / opKey）。
+	//
+	// 没有它就会一直响：一个服务崩了、额度也用光了，而「它不在了」这件事每三秒
+	// 被看见一次，每次都走到「到上限了」那一步，于是同一个服务每三秒弹一条。
+	//
+	// 按「服务名 + 用途」分栏，而不是一个服务一栏：「它崩了」和「它拉不起来」
+	// 是同一次崩溃上的两件事、两条通知，挤在一栏里后发的会把前一条的记号顶掉，
+	// 下一次巡检看见记号对不上，就把前一条重发一遍。
+	told map[string]string
+
 	// onLoad 在每次成功加载清单后调用，宿主用它记住「上次用的是哪份」。
 	//
 	// 挂在 Panel 上而不是让宿主包一层 Load，是因为编辑入口（保存服务、改分组）
@@ -155,6 +206,7 @@ func New() *Panel {
 		ops:      map[string]*operation{},
 		jobs:     make(chan job, 256),
 		restarts: map[string][]time.Time{},
+		told:     map[string]string{},
 		done:     make(chan struct{}),
 	}
 	p.mgr = manage.New(p.Load)
@@ -221,6 +273,97 @@ func (p *Panel) fireNotify() {
 	if fn != nil {
 		fn()
 	}
+}
+
+// SetUserNotify 装上给用户看的系统通知。传 nil 表示不发（命令行、pier api 就是这样）。
+func (p *Panel) SetUserNotify(fn func(title, body string)) {
+	p.mu.Lock()
+	p.userNotify = fn
+	p.mu.Unlock()
+}
+
+// crashKey 认出一个「这一次运行」：同一个 PID 换了新的启动时刻，就是另一次崩溃。
+//
+// 只看服务名不行——那样一个崩了又起、起了又崩的服务只会在第一次开口，
+// 第二次开始就永远安静了。只看 PID 也不行：PID 会被系统复用。
+// 两个凑一起，才既分得开先后、又不会把两件事混成一件。
+func crashKey(e *proc.Entry) string {
+	return fmt.Sprintf("%d@%d", e.PID, e.StartedAt.UnixNano())
+}
+
+// opKey 认出「哪一次动作」。起不来这件事没有进程可以认（进程压根没起来），
+// 编的是动作的号（见 operation.id）。
+func opKey(op *operation) string {
+	return fmt.Sprintf("op%d", op.id)
+}
+
+// 通知的用途。同一个服务上的两件事各占一个槽位：挤在一个槽里的话，
+// 后发的记号会把前一条顶掉，巡检下一次看见记号对不上，就把前一条重发一遍。
+const (
+	useCrash = "异常退出"
+	useStart = "启动失败"
+)
+
+// say 发一条系统通知，同一件事只发一次。
+//
+// name 是服务名、use 是这件事叫什么（「异常退出」「启动失败」各算一件）、
+// key 是这件事的标识（见 crashKey / opKey），三者一起构成去重的凭据。
+//
+// 去重放在这里而不是各个调用点上：发通知的地方有好几处（崩了、起不来、额度用光），
+// 而它们各自都知道该拿什么当凭据，谁先发出去算谁的。
+func (p *Panel) say(name, use, key, title, body string) {
+	slot := name + "\x00" + use
+	p.mu.Lock()
+	if p.told[slot] == key {
+		p.mu.Unlock()
+		return
+	}
+	p.told[slot] = key
+	fn := p.userNotify
+	p.mu.Unlock()
+	if fn != nil {
+		fn(title, body)
+	}
+}
+
+// sayStartFail 通知「这一次没拉起来」。
+//
+// 用户自己点的那一下不发（auto 为假）：他正看着屏幕，界面上那一行已经写着为什么，
+// 再弹一条系统通知是同一句话在第二个地方又说一遍。巡检排的那一次没人在看，
+// 不说就没人知道——而「自动重启了几次还是起不来」正是最该被告知的那件事。
+func (p *Panel) sayStartFail(svc *config.Service, op *operation, auto bool, hit diag.Hit, hasHit bool, tail string) {
+	if !auto {
+		return
+	}
+	p.say(svc.Name, useStart, opKey(op), svc.Name+" 启动失败", notifyBody(hit, hasHit, trimDetailPath(tail)))
+}
+
+// notifyBody 拼一条通知的正文：认得出原因就把原因、下一步和原文一并说了，再说后面这句。
+//
+// 原文要带上：只说「依赖没装」，用户还得自己去日志里翻是哪一个依赖，
+// 而「Cannot find module 'express'」里那个名字正是他下一步要动手的地方。
+//
+// 认不出来时只留后面那句。硬凑一句「原因不详」没有意义——通知要的是「你现在该做什么」，
+// 说不出就不说（见 internal/diag）。
+func notifyBody(hit diag.Hit, hasHit bool, tail string) string {
+	if !hasHit {
+		return tail
+	}
+	return fmt.Sprintf("%s：%s\n%s\n%s", hit.Reason, hit.Next, hit.Line, tail)
+}
+
+// trimDetailPath 去掉错误尾巴上那句「，详见 <日志路径>」。
+//
+// 系统通知点不开一条路径，而它常常比前半句还长，正文会被它占满。
+// 日志在哪，界面上那行的「查看日志」和命令行的提示都写着。
+//
+// 摘的是 proc 拼的那句「服务 X 编译失败，详见 <路径>」（见 supervisor.go），
+// 只有认识它才摘得准：认不出就原样留着，宁可长一点。
+func trimDetailPath(s string) string {
+	if i := strings.LastIndex(s, "，详见 "); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // Load 加载配置并替换掉当前这份。失败时不破坏原有状态，调用方决定怎么提示。
@@ -403,6 +546,11 @@ func (p *Panel) recoverCrashed() {
 	now := time.Now()
 	for _, svc := range cfg.StartOrder() {
 		if svc.Restart != config.RestartOnFailure {
+			// 只报「说好要一直跑」的那几个。restart 留空的服务崩了也照崩，
+			// 再起一次会盖掉编辑器里那份现场；而更要紧的是，一次性跑完就退出的
+			// 服务（跑一遍构建、做一次迁移）在 Pier 眼里和崩溃长得一模一样——
+			// 退出码拿不到（进程是 Release 出去的，见 supervisor.go），
+			// 分不出「跑完了」和「崩了」，那就不能替用户下结论说它出事了。
 			continue
 		}
 		e, ok := state.Services[svc.Name]
@@ -411,20 +559,40 @@ func (p *Panel) recoverCrashed() {
 			// 前者多半是启动就失败（端口冲突、依赖没装），再起一次还是同样的结果。
 			continue
 		}
-		p.enqueueRestart(svc, now)
+		key := crashKey(e)
+		p.mu.Lock()
+		told := p.told[svc.Name+"\x00"+useCrash] == key
+		p.mu.Unlock()
+		if told {
+			continue
+		}
+		// 诊断要在排重启之前读。重启一旦跑起来就会往日志里写一行新的启动标记，
+		// 那之后读到的「最后一次运行」就是这一次空白的新运行了（见 proc.TrimToLastRun），
+		// 而要说的是它为什么没的那一次。
+		hit, hasHit := diag.FromLog(cfg, svc.Name)
+		note := p.enqueueRestart(svc, now)
+		if note == "" {
+			// 身上已经有动作在跑了——用户正动它，或者上一次自动重启还没完。
+			// 这一次不说什么，等它自己有个结果。
+			continue
+		}
+		p.say(svc.Name, useCrash, key, svc.Name+" 异常退出", notifyBody(hit, hasHit, note))
 	}
 }
 
-// enqueueRestart 记一次自动重启并把启动排进队列。
+// enqueueRestart 记一次自动重启并把启动排进队列，返回一句「接下来会怎样」。
+//
+// 返回空串表示这次什么都没排（身上已经有动作了），调用方据此决定要不要说话。
+// 「重启到上限」也算排上了——那句话正是不该被吞掉的那一条。
 //
 // 记账与占位在同一把锁里完成，不能拆成「先看看有没有额度、再调 Start」：
 // 两次加锁之间隔着一个 tick 的话，一个每秒都崩的服务会被同一秒里的两次轮询各排一次。
-func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) {
+func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) string {
 	p.mu.Lock()
 	if op := p.ops[svc.Name]; op != nil && op.phase != "error" {
 		// 身上已经有动作了——上一次自动重启还在跑，或者用户正动它。
 		p.mu.Unlock()
-		return
+		return ""
 	}
 	kept := p.restarts[svc.Name][:0]
 	for _, at := range p.restarts[svc.Name] {
@@ -437,15 +605,17 @@ func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) {
 		// 等窗口过去这些时刻会自然过期，额度重新有。
 		p.restarts[svc.Name] = kept
 		p.mu.Unlock()
-		return
+		return fmt.Sprintf("已经自动重启 %d 次，到上限了（%d 分钟内最多 %d 次），先不再拉起",
+			len(kept), int(restartWindow.Minutes()), restartLimit)
 	}
 	op := newOp("start", "queued")
 	p.ops[svc.Name] = op
 	p.restarts[svc.Name] = append(kept, now)
 	p.mu.Unlock()
 
-	p.jobs <- job{kind: "start", svc: svc, op: op}
+	p.jobs <- job{kind: "start", svc: svc, op: op, auto: true}
 	p.fireNotify()
+	return fmt.Sprintf("已自动重启第 %d 次", len(kept)+1)
 }
 
 // restartNote 是这个服务此刻该显示的自动重启说明，没有则返回空串。
@@ -517,7 +687,7 @@ func (p *Panel) stopOne(svc *config.Service) error {
 func (p *Panel) startOne(j job) {
 	svc, op := j.svc, j.op
 	p.mu.Lock()
-	sup := p.sup
+	sup, cfg := p.sup, p.cfg
 	p.mu.Unlock()
 	if sup == nil {
 		p.fail(svc.Name, op, errors.New("尚未加载服务清单"))
@@ -526,12 +696,20 @@ func (p *Panel) startOne(j job) {
 
 	// 端口已被监听说明可能已经在 IDEA 或别的终端跑着，此时再起一个必然冲突。
 	if svc.Port > 0 && proc.PortOpen(svc.Port) {
-		p.fail(svc.Name, op, fmt.Errorf("端口 %d 已被占用（可能已在 IDEA 或其它终端运行）", svc.Port))
+		err := fmt.Errorf("端口 %d 已被占用（可能已在 IDEA 或其它终端运行）", svc.Port)
+		p.fail(svc.Name, op, err)
+		// 不带诊断：这一次运行一个字都没往日志里写过（还没轮到监督进程），
+		// 读出来的只会是上一件事的原文，张冠李戴比不说更坏。
+		p.sayStartFail(svc, op, j.auto, diag.Hit{}, false, err.Error())
 		return
 	}
 	if err := sup.StartContext(op.ctx, svc); err != nil {
 		if op.ctx.Err() == nil {
 			p.fail(svc.Name, op, err)
+			// 诊断要在这次失败之后读：监督进程这一趟写进日志的东西正是它起不来的原因，
+			// 而它是刚写下去的（不像 recoverCrashed，那里要赶在重启覆盖之前读）。
+			hit, hasHit := diag.FromLog(cfg, svc.Name)
+			p.sayStartFail(svc, op, j.auto, hit, hasHit, err.Error())
 		}
 		return
 	}

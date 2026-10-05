@@ -242,6 +242,9 @@
         // 自相矛盾的画面（顶上写着「只读不写」，每一行却还挂着「编辑这个应用」）。
         editable: !demoReadOnly,
         occupant: null, op: "", opErr: "", opKind: "", toolchain: null,
+        // 出事的服务下面那一句诊断（原因 + 下一步 + 命中的原文），由后端从日志尾部
+        // 认出来。认不出来时是 null——宁可不说，也不能猜（见 internal/diag）。
+        diag: null,
         // 依赖与重启：默认没有前置、不自动重启，需要演的那几条各自覆盖。
         dependsOn: [], restart: "", restartNote: "",
         runtimes: [DEMO_GO],
@@ -319,6 +322,11 @@
           restart: "on-failure",
           restartNote: "进程退出后已自动重启 3 次，已达上限（10 分钟 3 次），暂停自动重启",
           opErr: "服务 shop-web 编译失败，详见 /Users/you/.pier/logs/shop-web/2026-10-01.log",
+          // 这一条同时演「日志尾部认得出原因」：一句原因、一句下一步，
+          // 再抄上命中那行的原文。原文常常很长，摆一条长一点的出来，
+          // 好核对它在窄窗口里是怎么截的。
+          diag: { reason: "编译没过", next: "看原文里第一个 error，那里写着是哪一处",
+            line: "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.13.0:compile (default-compile) on project shop-web: Compilation failure: cannot find symbol" },
           occupant: { port: 47823, pid: 9310, command: "node", user: "you" } }),
         // 这一条专演「探针没探通、服务照跑」：状态是「运行中」（不是永远挂在
         // 启动中），说明里挂一句警示色的解释，动作区没有停止之外的麻烦事，
@@ -793,6 +801,14 @@
     var saved = window.__PIER_SETTINGS__;
     if (saved && saved.theme) return saved.theme;
     try { return localStorage.getItem(THEME_KEY) || "system"; } catch (err) { return "system"; }
+  }
+
+  // 通知开关与主题同一份注入（见上）。注入里没有这一项时按「开」：
+  // 默认值在后端只有 config.defaultSettings 那一处，这里反着来就会让一个刚装上的
+  // Pier 把开关画成关的，而它其实是开的——用户看见的和他实际有的对不上。
+  function initialNotify() {
+    var saved = window.__PIER_SETTINGS__;
+    return !saved || saved.notify !== false;
   }
 
   function useTheme() {
@@ -1340,6 +1356,10 @@
     var token = A.theme.useToken().token;
     var busy = !!s.op;
     var live = s.statusKey === "running" || s.statusKey === "starting";
+    // 出事的服务才有：日志尾部认出来的那句话。没有就整段不出现——
+    // 「没认出原因」不该占一行说「原因不详」，那和「一切正常」在这张表里
+    // 长得一样，都只是又一行字。
+    var dg = s.diag;
 
     // 后端用 "-" 表示「这项没有」，而 "-" 在 JS 里是真值——早先直接
     // 用真值判断，未启动的服务于是渲染成了「运行 -」。一律先过 hasVal。
@@ -1504,6 +1524,15 @@
             <span>${s.opErr.replace(/[，,]\s*详见\s+\S+\s*$/, "")}</span>
             <${A.Button} type="link" className="dc-row-err-link"
               onClick=${function () { act("logs", s); }}>查看日志<//></div>` : null}
+          ${"" /* 出事的原因。后端从日志尾部认出来的，这里的措辞不做二次加工：
+                 原文那行照抄，用户的下一步（改端口、装依赖、换 JDK）就藏在它里面，
+                 重写一遍只会把端口号、模块名这些字丢掉。 */}
+          ${dg ? html`<div className="dc-row-diag" style=${{ fontSize: token.fontSizeSM }}>
+            <span className="dc-row-diag-why" style=${{ color: token.colorWarning }}>
+              ${e(IconAlert, { size: 12 })}<span>${dg.reason}：${dg.next}</span></span>
+            <span className="dc-row-diag-src" style=${{ color: token.colorTextTertiary }}
+              title=${dg.line}>原文：${dg.line}</span>
+          </div>` : null}
         </div>
       </div>
 
@@ -3185,6 +3214,20 @@
       props.reload();
     };
 
+    // 通知开关读的是注入进来的偏好（initialNotify），不在更新状态里——那一份说的是
+    // 「有没有新版」。写失败就退回原样：这一格和 settings.json 必须是同一个事实，
+    // 显示成改成功了而其实没写进去，比不改还误导人。
+    var ns = React.useState(initialNotify), notifyOn = ns[0], setNotifyOn = ns[1];
+
+    var saveNotify = async function (v) {
+      var want = !!v;
+      setNotifyOn(want);
+      setBusy("notify");
+      try { await call("saveSettings", JSON.stringify({ notify: want })); }
+      catch (ex) { props.message.error(ex.message); setNotifyOn(!want); }
+      setBusy("");
+    };
+
     // 换文件只有这一条路：助手等 Pier 退出、换、再拉回来。
     //
     // 顺序要摆对——先把「已经安排好了」显示出来，过一会儿再关窗口。反过来的话，
@@ -3315,6 +3358,19 @@
             onChange=${saveAuto}/>
         </div>
         <div className="dc-set-hint" style=${sm}>关掉之后只是不再自己去问；上面的「检查更新」随时可用。</div>
+      </section>
+
+      <section className="dc-card">
+        <div className="dc-card-head">
+          <span className="dc-card-title">通知</span>
+          <span className="dc-card-sub">只在服务出事时响，平时不打扰</span>
+        </div>
+        <div className="dc-set-row">
+          <span className="dc-set-key">出错时通知我</span>
+          <span className="dc-set-flex"/>
+          <${A.Switch} checked=${notifyOn} loading=${busy === "notify"} onChange=${saveNotify}/>
+        </div>
+        <div className="dc-set-hint" style=${sm}>只在服务异常退出、自动重启到上限、启动失败时各发一条，别的一概不打扰。</div>
       </section>
     </${React.Fragment}>`;
 

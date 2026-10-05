@@ -228,7 +228,10 @@ func uiDetectKinds(cfg *config.Config) map[string]string {
 
 // cmdUI 打开交互式面板。args 支持 --config X / --config=X，与其它子命令一致。
 func cmdUI(args []string) int {
-	cfgPath, _ := extractConfig(args)
+	cfgPath, rest := extractConfig(args)
+	if err := noExtra("ui", rest); err != nil {
+		return fail("%v", err)
+	}
 	cfg, sup, err := setup(cfgPath)
 	if err != nil {
 		return fail("%v", err)

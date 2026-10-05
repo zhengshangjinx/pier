@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zhengshangjinx/pier/internal/config"
+	"github.com/zhengshangjinx/pier/internal/diag"
 	"github.com/zhengshangjinx/pier/internal/manage"
 	"github.com/zhengshangjinx/pier/internal/proc"
 	"github.com/zhengshangjinx/pier/internal/view"
@@ -97,6 +98,22 @@ type ServiceOut struct {
 	// 嵌成一层而不是摊平成三个 cpu/memBytes/procs：这三个数永远一起出现、
 	// 一起变化，摊平后每个消费方都得自己记得「它们是一组」。
 	Usage UsageOut `json:"usage"`
+	// Diag 是从日志尾部读出来的「一句原因 + 一句下一步」，只在出事时有：
+	// 启动失败（OpErr 非空）或进程不见了（Stale）。
+	//
+	// 日志里写着的是工具链自己的行话，而用户要的是该去做什么，中间那一步
+	// 由它补上。认不出来时为 nil（见 internal/diag）：宁可不说，也不能猜。
+	Diag *diag.Hit `json:"diag"`
+}
+
+// OpInfo 是一个服务身上正在进行的动作，由面板翻译成人能读的一句话。
+//
+// 命令行没有这一组：它自己就是一次前台动作，没有「排队 / 编译 / 等就绪」这些
+// 中间阶段可言，结束了才返回。所以只有面板会填。
+type OpInfo struct {
+	Label string // 空表示空闲
+	Kind  string // start / stop / restart，界面据此决定主按钮
+	Err   string // 上次操作失败的原因
 }
 
 // GroupOut 是侧栏里的一栏分组。
@@ -166,14 +183,25 @@ type LogOut struct {
 func (p *Panel) State() StateOut {
 	p.mu.Lock()
 	cfg, sup, cfgPath, cfgSrc, cfgErr := p.cfg, p.sup, p.cfgPath, p.cfgSrc, p.cfgErr
-	ops := make(map[string]operation, len(p.ops))
+	ops := make(map[string]OpInfo, len(p.ops))
 	for k, v := range p.ops {
 		if v != nil {
-			ops[k] = *v
+			ops[k] = v.opInfo()
 		}
 	}
 	p.mu.Unlock()
+	return Snapshot(cfg, sup, cfgPath, cfgSrc, cfgErr, ops, p.restartNote)
+}
 
+// Snapshot 汇总一次完整快照。面板与命令行（`pier status --json`）共用这一份。
+//
+// 输入是清单、supervisor 与清单的来源说明，另加只有面板才有的两样：正在进行的
+// 动作（ops）、自动重启的说明（note）。命令行这两样都没有，传 nil。
+//
+// 分头组装是不行的：StateOut 上每一个 json 键名都是对外承诺，各写一份的话，
+// 加一个字段就会漏掉一边，而两边的消费方（界面与脚本）都会以为自己看到的是全部。
+func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr string,
+	ops map[string]OpInfo, note func(string) string) StateOut {
 	if cfg == nil || sup == nil {
 		return StateOut{OK: false, Error: cfgErr, ConfigPath: cfgPath, ConfigSrc: cfgSrc}
 	}
@@ -232,7 +260,6 @@ func (p *Panel) State() StateOut {
 	out.Services = make([]ServiceOut, 0, len(list))
 	for _, st := range list {
 		svc := st.Service
-		op := ops[svc.Name]
 		item := ServiceOut{
 			Name:         svc.Name,
 			Kind:         svc.Kind,
@@ -263,7 +290,7 @@ func (p *Panel) State() StateOut {
 			Runtimes:     runtimesOf(sup, svc),
 			DependsOn:    svc.DependsOn,
 			Restart:      svc.Restart,
-			RestartNote:  p.restartNote(svc.Name),
+			RestartNote:  noteText(note, svc.Name),
 			Editable:     cfg.IsStore(),
 			Occupant:     st.Occupant,
 		}
@@ -272,15 +299,19 @@ func (p *Panel) State() StateOut {
 		if st.Running {
 			item.Usage = usageOf(st.PGID)
 		}
-		item.Op = op.label()
-		if item.Op != "" {
-			item.OpKind = op.kind
+		if op, ok := ops[svc.Name]; ok {
+			item.Op, item.OpErr = op.Label, op.Err
+			if item.Op != "" {
+				item.OpKind = op.Kind
+				out.BusyCount++
+			}
 		}
-		if op.phase == "error" {
-			item.OpErr = op.err
-		}
-		if item.Op != "" {
-			out.BusyCount++
+		// 只给出事的那几个读日志：认一次要读 64 KB 再逐行比对，而这条路径
+		// 每两秒走一遍，好好跑着的服务不该为此付费。
+		if item.Stale || item.OpErr != "" {
+			if h, ok := diag.FromLog(cfg, svc.Name); ok {
+				item.Diag = &h
+			}
 		}
 		out.Services = append(out.Services, item)
 	}
@@ -298,6 +329,15 @@ func (p *Panel) State() StateOut {
 		}
 	}
 	return out
+}
+
+// noteText 问一句这个服务此刻该显示什么重启说明。那份账本只有面板有
+// （巡检归它跑），命令行传进来的 note 是 nil。
+func noteText(note func(string) string, name string) string {
+	if note == nil {
+		return ""
+	}
+	return note(name)
 }
 
 // add 把另一份用量并进来。
@@ -446,6 +486,12 @@ func (p *Panel) LogUsage() (LogUsageOut, error) {
 	if cfg == nil {
 		return LogUsageOut{}, manage.ErrNoConfig
 	}
+	return LogUsageOf(cfg), nil
+}
+
+// LogUsageOf 是 LogUsage 的本体：`pier logs --size --json` 与界面读的是同一份。
+// 命令行另算一份的话，同一个数字迟早有两种说法（而它正是「清哪几个服务」的依据）。
+func LogUsageOf(cfg *config.Config) LogUsageOut {
 	raw := proc.LogUsage(cfg.LogDir(), proc.LogKeepDays, time.Now())
 	out := LogUsageOut{
 		OK: raw.OK, Dir: raw.Dir, Bytes: raw.Bytes, Size: view.Bytes(raw.Bytes),
@@ -458,7 +504,7 @@ func (p *Panel) LogUsage() (LogUsageOut, error) {
 			Oldest: s.Oldest, Newest: s.Newest,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // busyNames 返回此刻不该动日志的服务：正在跑的，以及排队中 / 编译中 / 启动中的。

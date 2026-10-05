@@ -4,12 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mattn/go-runewidth"
 
 	"github.com/zhengshangjinx/pier/internal/config"
+	"github.com/zhengshangjinx/pier/internal/diag"
+	"github.com/zhengshangjinx/pier/internal/panel"
 	"github.com/zhengshangjinx/pier/internal/proc"
 	"github.com/zhengshangjinx/pier/internal/view"
 )
@@ -39,10 +42,8 @@ func extractConfig(args []string) (string, []string) {
 // loadConfig 决定这次用哪份清单：给了 --config 就用它（YAML 只读，或者某份数据文件）；
 // 没给就用 Pier 自己的数据文件，和界面是同一份。
 func loadConfig(cfgPath string) (*config.Config, error) {
-	if strings.TrimSpace(cfgPath) != "" {
-		return config.Open(cfgPath)
-	}
-	return config.OpenDefault()
+	cfg, _, _, err := loadConfigSource(cfgPath)
+	return cfg, err
 }
 
 // setup 加载配置并构造 supervisor。
@@ -85,15 +86,18 @@ func cmdUp(args []string) int {
 
 	started := make([]*config.Service, 0, len(targets))
 	failed := make([]string, 0)
+	skipped := make([]string, 0)
 
 	for _, svc := range targets {
 		// 端口已被监听说明可能已经在 IDEA 或别的终端跑着，此时再起一个必然冲突。
 		if svc.Port > 0 && proc.PortOpen(svc.Port) {
 			fmt.Printf("  %-14s 跳过：端口 %d 已被占用（可能已在 IDEA 或其它终端运行）\n", svc.Name, svc.Port)
+			skipped = append(skipped, svc.Name)
 			continue
 		}
 		if err := sup.Start(svc); err != nil {
 			fmt.Printf("  %-14s 启动失败：%v\n", svc.Name, err)
+			printDiag(cfg, svc.Name, "    ")
 			tailLog(cfg, svc.Name, logTailLines)
 			failed = append(failed, svc.Name)
 			continue
@@ -115,25 +119,36 @@ func cmdUp(args []string) int {
 		}
 		fmt.Printf("  %-14s 已启动，但 %s 内没通过探针 %s（服务本身在运行）\n",
 			svc.Name, proc.HealthWait, svc.Health)
+		printDiag(cfg, svc.Name, "    ")
 		tailLog(cfg, svc.Name, logTailLines)
 		notReady = append(notReady, svc.Name)
 	}
 
+	// 收尾分节说，因为每一节要人做的下一步都不同。三节里任意一节非空就不算成功，
+	// **包括「跳过」**：up 的承诺是「这些服务在跑」，而端口被别人占着的时候它们不在，
+	// 那正是要人去看一眼的时候。给 0 会让脚本以为全套都起来了——最坏的一种错。
 	if len(failed) > 0 {
 		fmt.Printf("\n未启动：%s\n", strings.Join(failed, "、"))
-		return 1
 	}
-	if len(started) == 0 {
-		fmt.Println("\n没有启动任何服务。")
-		return 0
+	if len(skipped) > 0 {
+		fmt.Printf("\n跳过：%s\n", strings.Join(skipped, "、"))
+		fmt.Println("  端口已被占用，多半已经在 IDEA 或别的终端里跑着；看是谁占的：pier ports")
 	}
 	if len(notReady) > 0 {
-		// 仍然算失败：up 的承诺是「等到就绪」，不是「进程拉起来了」。
+		// 也算失败：up 的承诺是「等到就绪」，不是「进程拉起来了」。
 		// 但措辞必须说清是哪一种——这两件事的下一步动作完全不同。
-		fmt.Printf("\n已启动 %d 个服务，其中 %s 没通过健康探针。\n",
-			len(started), strings.Join(notReady, "、"))
-		fmt.Println("这些服务在运行，只是探针没探通：确认地址是否写对，或者不需要探针就在界面上点「不再检查健康」。")
+		fmt.Printf("\n探针没通：%s（服务在运行，只是 %s 内没探通）\n",
+			strings.Join(notReady, "、"), proc.HealthWait)
+		fmt.Println("  确认地址是否写对，或者不需要探针就在界面上点「不再检查健康」。")
+	}
+	if len(failed)+len(skipped)+len(notReady) > 0 {
 		return 1
+	}
+
+	if len(started) == 0 {
+		// 一个都没跳过、也没失败，只是清单里没有可起的服务。这不是出错。
+		fmt.Println("没有启动任何服务。")
+		return 0
 	}
 	fmt.Printf("\n已启动 %d 个服务。查看状态：pier status\n", len(started))
 	return 0
@@ -194,7 +209,16 @@ func cmdRestart(args []string) int {
 
 // cmdStatus 以表格展示所有服务的状态。
 func cmdStatus(args []string) int {
-	cfgPath, _ := extractConfig(args)
+	cfgPath, rest := extractConfig(args)
+	jsonOut, rest := extractJSON(rest)
+	if err := noExtra("status", rest); err != nil {
+		return fail("%v", err)
+	}
+
+	if jsonOut {
+		return statusJSON(cfgPath)
+	}
+
 	cfg, sup, err := setup(cfgPath)
 	if err != nil {
 		return fail("%v", err)
@@ -217,6 +241,38 @@ func cmdStatus(args []string) int {
 		})
 	}
 	renderTable([]string{"服务", "状态", "端口", "PID", "运行时长", "说明"}, rows)
+
+	// 记录还在、进程没了的那几个补一块：表格里只有「已退出」三个字，
+	// 而日志里写着它为什么退出。这一句正是 status 最该回答的问题。
+	for _, st := range list {
+		if !st.Stale {
+			continue
+		}
+		h, ok := diag.FromLog(cfg, st.Service.Name)
+		if !ok {
+			continue
+		}
+		fmt.Printf("\n%s\n%s", st.Service.Name, diagLines(h, "  "))
+	}
+	return 0
+}
+
+// statusJSON 输出与界面同一份快照。
+//
+// 清单打不开时照样输出：StateOut 本来就能表达这件事（ok=false + error），
+// 脚本看见的是一句能读的原因，而不是一屏中文报错加一个退出码。
+// 退出码仍然非 0——这一条命令没做成它该做的事，别让 `pier status --json && …` 继续往下走。
+func statusJSON(cfgPath string) int {
+	cfg, path, src, cfgErr := loadConfigSource(cfgPath)
+	var sup *proc.Supervisor
+	if cfg != nil {
+		sup = proc.New(cfg)
+	}
+	st := panel.Snapshot(cfg, sup, path, src, errText(cfgErr), nil, nil)
+	printJSON(st)
+	if !st.OK {
+		return 1
+	}
 	return 0
 }
 
@@ -225,39 +281,77 @@ func cmdStatus(args []string) int {
 
 // cmdLogs 看、跟随、清理服务日志。
 //
-//	pier logs <服务>              打印最近的日志
+//	pier logs <服务>...            打印最近的日志（几个服务就依次打印）
 //	pier logs <服务> -f           持续跟随
-//	pier logs --size              看日志占了多少
-//	pier logs --clean [服务]      清理超过保留天数的日志
-//	pier logs --clean --all [服务] 清空（不看天数）
+//	pier logs <服务> --tail N     只看最后 N 行
+//	pier logs --size [--json]     看日志占了多少
+//	pier logs --clean [服务...]   清理超过保留天数的日志
+//	pier logs --clean --all [...] 清空（不看天数）
 func cmdLogs(args []string) int {
 	cfgPath, rest := extractConfig(args)
-	follow, clean, all, size := false, false, false, false
+	jsonOut, rest := extractJSON(rest)
+
+	follow, clean, all, size, tailSet := false, false, false, false, false
+	tail := logTailLines * 5
 	names := make([]string, 0, len(rest))
-	for _, a := range rest {
-		switch a {
-		case "-f", "--follow":
+
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case a == "-f" || a == "--follow":
 			follow = true
-		case "--clean":
+		case a == "--clean":
 			clean = true
-		case "--all":
+		case a == "--all":
 			all = true
-		case "--size":
+		case a == "--size":
 			size = true
+		case a == "--tail" || strings.HasPrefix(a, "--tail="):
+			arg := strings.TrimPrefix(a, "--tail=")
+			if a == "--tail" {
+				if i+1 >= len(rest) {
+					return fail("--tail 后面要跟行数，例如：pier logs demo-admin --tail 200")
+				}
+				i++
+				arg = rest[i]
+			}
+			n, err := strconv.Atoi(arg)
+			if err != nil || n <= 0 {
+				return fail("--tail 要一个正整数行数，收到的是「%s」", arg)
+			}
+			tail, tailSet = n, true
 		default:
+			// 认不出来的开关当场报错。以前它们会被当成服务名，报的是
+			// 「没有名为 --tial 的服务」——一句看起来像自己打错了的话。
+			if strings.HasPrefix(a, "-") {
+				return fail("logs 不认识参数 %s（看帮助：pier logs -h）", a)
+			}
 			names = append(names, a)
 		}
 	}
+
+	// 几个开关会互相压掉，所以先把组合说清楚，不给「给了也没反应」的余地。
+	if jsonOut && !size {
+		return fail("--json 只配 --size 用（日志正文本身就是要原样读的，套一层 JSON 反而要多解一层）")
+	}
+	if all && !clean {
+		return fail("--all 只在 --clean 下有意义，例如：pier logs --clean --all")
+	}
+	if tailSet && (size || clean) {
+		return fail("--tail 是看日志用的，不能和 --size / --clean 一起用")
+	}
+	if size && len(names) > 0 {
+		return fail("--size 统计的是全部服务。只看某一个：pier logs --size | grep %s", names[0])
+	}
+	if follow && clean {
+		return fail("--follow 是跟着看的，不能和 --clean 一起用")
+	}
+	if follow && len(names) > 1 {
+		return fail("--follow 一次只能跟一个服务")
+	}
 	// 清理可以不带服务名（全部），看日志必须指明是哪个。
-	if !clean && !size && len(names) != 1 {
+	if !clean && !size && len(names) == 0 {
 		return fail("logs 需要一个服务名，例如：pier logs demo-admin")
-	}
-	if len(names) > 1 {
-		return fail("logs 一次只处理一个服务")
-	}
-	var name string
-	if len(names) == 1 {
-		name = names[0]
 	}
 
 	cfg, _, err := setup(cfgPath)
@@ -265,18 +359,40 @@ func cmdLogs(args []string) int {
 		return fail("%v", err)
 	}
 
-	if size {
-		return cmdLogSize(cfg)
-	}
-	if clean {
-		return cmdLogClean(cfg, name, all)
-	}
-
-	svc, err := cfg.Find(name)
-	if err != nil {
-		return fail("%v", err)
+	switch {
+	case size:
+		return cmdLogSize(cfg, jsonOut)
+	case clean:
+		return cmdLogClean(cfg, names, all)
 	}
 
+	svcs := make([]*config.Service, 0, len(names))
+	for _, n := range names {
+		svc, err := cfg.Find(n)
+		if err != nil {
+			return fail("%v", err)
+		}
+		svcs = append(svcs, svc)
+	}
+	// 一个服务读不成（比如它还没跑过、没有日志文件）不该把其余的也拦下：
+	// 一起看几个服务，正是为了看「哪个没出声」。
+	code := 0
+	for i, svc := range svcs {
+		if i > 0 {
+			fmt.Println()
+		}
+		if len(svcs) > 1 {
+			fmt.Printf("%s\n", svc.Name)
+		}
+		if c := showLog(cfg, svc, tail, follow); c != 0 {
+			code = c
+		}
+	}
+	return code
+}
+
+// showLog 打印一个服务的日志尾部，follow 为真时接着跟下去。
+func showLog(cfg *config.Config, svc *config.Service, n int, follow bool) int {
 	// 读最新的一份而不是今天那份：跨了零点还在跑的服务写的一直是启动那天的文件。
 	path := proc.LogFile(cfg, svc.Name)
 	f, err := os.Open(path)
@@ -285,7 +401,7 @@ func cmdLogs(args []string) int {
 	}
 	defer f.Close()
 
-	if err := printTail(f, logTailLines*5); err != nil {
+	if err := printTail(f, n); err != nil {
 		return fail("%v", err)
 	}
 	if !follow {
@@ -296,7 +412,10 @@ func cmdLogs(args []string) int {
 }
 
 // cmdLogSize 列出日志目录的占用，按服务从大到小。
-func cmdLogSize(cfg *config.Config) int {
+func cmdLogSize(cfg *config.Config, jsonOut bool) int {
+	if jsonOut {
+		return printJSON(panel.LogUsageOf(cfg))
+	}
 	usage := proc.LogUsage(cfg.LogDir(), proc.LogKeepDays, time.Now())
 	rows := make([][]string, 0, len(usage.Services))
 	for _, s := range usage.Services {
@@ -317,13 +436,13 @@ func cmdLogSize(cfg *config.Config) int {
 }
 
 // cmdLogClean 清理日志。all 为真时不分日期一律清掉，否则只清超过保留天数的。
-func cmdLogClean(cfg *config.Config, name string, all bool) int {
-	what := "全部服务"
-	if name != "" {
-		if _, err := cfg.Find(name); err != nil {
+//
+// 名字可以给几个，也可以一个不给（全部）。
+func cmdLogClean(cfg *config.Config, names []string, all bool) int {
+	for _, n := range names {
+		if _, err := cfg.Find(n); err != nil {
 			return fail("%v", err)
 		}
-		what = name
 	}
 
 	// 正在跑的服务跳过：它的日志 fd 由那个独立进程握着，删掉文件只是
@@ -332,11 +451,37 @@ func cmdLogClean(cfg *config.Config, name string, all bool) int {
 	if err != nil {
 		busy = map[string]bool{}
 	}
-	if name != "" && busy[name] {
-		fmt.Printf("  %s：正在运行，日志还在写，先停下再清理\n", name)
-		return 0
-	}
 
+	code := 0
+	// 一次一个服务地走：谁没清成，必须一眼看见（退出码是给脚本看的，
+	// 这一行是给人看的）。指到不存在的名字上面已经拦下了，这里不会再报错。
+	for _, name := range names {
+		if busy[name] {
+			fmt.Printf("  %s：正在运行，日志还在写，先停下再清理\n", name)
+			// 想清的那一份没清成。以前这里返回 0，脚本会以为清干净了。
+			code = 1
+			continue
+		}
+		if c := cleanOne(cfg, name, all, busy); c != 0 {
+			code = c
+		}
+	}
+	// 不点名就是全部。这时跳过正在跑的那些是正常结果（它们本来就不该被清），
+	// 报出来的数字已经把它们排除在外，所以不算失败。
+	if len(names) == 0 {
+		if c := cleanOne(cfg, "", all, busy); c != 0 {
+			code = c
+		}
+	}
+	return code
+}
+
+// cleanOne 清理一个服务的日志；name 为空表示全部服务。busy 里的那些跳过不删。
+func cleanOne(cfg *config.Config, name string, all bool, busy map[string]bool) int {
+	what := "全部服务"
+	if name != "" {
+		what = name
+	}
 	var out proc.LogCleanOut
 	if all {
 		out = proc.ClearLogs(cfg.LogDir(), name, busy)
@@ -356,6 +501,21 @@ func cmdLogClean(cfg *config.Config, name string, all bool) int {
 }
 
 // cmdDoctor 见 doctor.go。
+
+// diagLines 把一条诊断铺成两行，缩进由调用方给。
+//
+// 原文必须一起给：端口号、模块名、缺的符号这些字只在原文里有，而它们恰恰是
+// 「去改哪一处」的答案；只说一句概括，用户还得回去翻日志找那一行。
+func diagLines(h diag.Hit, indent string) string {
+	return fmt.Sprintf("%s%s：%s\n%s原文：%s\n", indent, h.Reason, h.Next, indent, h.Line)
+}
+
+// printDiag 认识不出来就什么都不打：空着比说错强（见 internal/diag）。
+func printDiag(cfg *config.Config, name, indent string) {
+	if h, ok := diag.FromLog(cfg, name); ok {
+		fmt.Print(diagLines(h, indent))
+	}
+}
 
 // tailLog 在启动失败时就地回显日志尾部，省去再敲一次 logs。
 func tailLog(cfg *config.Config, name string, n int) {

@@ -8,83 +8,89 @@ import (
 	"github.com/zhengshangjinx/pier/internal/update"
 )
 
-const usageText = `Pier —— 统一启停本地多个项目的命令行工具
-
-用法：
-  pier <命令> [参数]
-
-命令：
-  doctor              检查各语言工具链能否解析（排查「只能在 IDEA 里跑」的问题）
-  detect [目录]       扫描目录，识别项目类型并给出建议的启动项
-  import [目录]       读取 .idea 运行配置，转换为 Pier 的服务定义
-  up [服务...]        启动服务（不带名字则启动全部）
-  down [服务...]      停止服务
-  restart [服务...]   重启服务
-  status              列出所有服务的运行状态
-  ports               列出本机正在监听的端口，以及各自是谁起的、在哪个目录
-  logs <服务>         查看某个服务的日志（-f 跟随）
-  logs --size         查看日志占了多少磁盘
-  logs --clean [服务] 清理超过 14 天的日志（--all 清空，不看天数）
-  ui                  打开交互式面板
-  api                 起一个只服务本机的 HTTP 接口（--show-token / --rotate / --port N）
-  version             显示版本号
-  update --check      查一下有没有新版本；退出码 0 已是最新，10 有新版本，1 没查成
-
-通用：
-  -h, --help          显示本帮助
-`
-
-func usage() {
-	fmt.Fprint(os.Stdout, usageText)
+// handlers 是动词到实现的表。它比 help.go 的 commands 只多一条：
+// update.ApplyVerb（更新助手的入口，不是给人敲的，见下面那条注释）。
+//
+// help 不在表里，也不在 commands 里——它解释的是命令，不是一件能做的事，
+// 由 Run 直接接住（printCommands / printCommandHelp）。它的用法写在全局帮助里。
+//
+// 两张表对不对得上由 help_test.go 守着：漏一条，帮助里就会写着一条敲了没反应的命令。
+var handlers = map[string]func([]string) int{
+	"doctor":         cmdDoctor,
+	"detect":         cmdDetect,
+	"import":         cmdImport,
+	"up":             cmdUp,
+	"down":           cmdDown,
+	"restart":        cmdRestart,
+	"wait":           cmdWait,
+	"status":         cmdStatus,
+	"ports":          cmdPorts,
+	"logs":           cmdLogs,
+	"ui":             cmdUI,
+	"api":            cmdApi,
+	"version":        cmdVersion,
+	"update":         cmdUpdate,
+	update.ApplyVerb: update.RunHelper,
 }
+
+// extraVerbs 是 handlers 里有、commands 里没有的那几个，供一致性测试比对。
+// 单列一张表而不是在测试里写死：多一个隐藏动词时，忘的是改这里，而不是改测试。
+var extraVerbs = []string{update.ApplyVerb}
 
 // Run 分发子命令并返回进程退出码。
 func Run(args []string) int {
 	if len(args) == 0 {
-		usage()
+		printCommands(os.Stdout)
 		return 2
 	}
 
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "doctor":
-		return cmdDoctor(rest)
-	case "detect":
-		return cmdDetect(rest)
-	case "import":
-		return cmdImport(rest)
-	case "ui":
-		return cmdUI(rest)
-	case "api":
-		return cmdApi(rest)
-	case "up":
-		return cmdUp(rest)
-	case "down":
-		return cmdDown(rest)
-	case "restart":
-		return cmdRestart(rest)
-	case "status":
-		return cmdStatus(rest)
-	case "ports":
-		return cmdPorts(rest)
-	case "logs":
-		return cmdLogs(rest)
-	case "version":
-		return cmdVersion(rest)
-	case "update":
-		return cmdUpdate(rest)
-	case update.ApplyVerb:
-		// 隐藏动词：更新助手拿它把「换文件」这件事跑起来。它不是给用户敲的，
-		// 所以不进上面的用法说明——摆在命令表里就得解释一遍它为什么存在。
-		return update.RunHelper(rest)
 	case "-h", "--help", "help":
-		usage()
+		// `pier help <命令>` 与 `pier <命令> -h` 说的是同一件事，
+		// 摆两条路是因为两种写法都太常见了，缺一条就会被当成打错。
+		if len(rest) > 0 {
+			return helpFor(rest[0])
+		}
+		printCommands(os.Stdout)
 		return 0
-	default:
+	case "--version", "-v":
+		// `--version` 不是命令，是通用的那一类开关，所以在这里拦、不进 handlers。
+		return cmdVersion(nil)
+	}
+
+	h, ok := handlers[cmd]
+	if !ok {
 		fmt.Fprintf(os.Stderr, "未知命令：%s\n\n", cmd)
-		usage()
+		printCommands(os.Stderr)
 		return 2
 	}
+	if wantsHelp(rest) {
+		// 在动词自己的解析器之前拦：`pier up --help` 会被 up 读成一个服务名，
+		// 报「没有名为 --help 的服务」——一句看起来像用户打错了的话。
+		if c, ok := findCommand(cmd); ok {
+			printCommandHelp(os.Stdout, c)
+			return 0
+		}
+	}
+	if wantsJSON(rest) && !acceptsJSON(cmd) {
+		// 不认 --json 的动词当场说清楚。放它过去的话，up 会把它当服务名，
+		// version 会当没看见——两种都只是让脚本拿到一份不是 JSON 的东西。
+		return rejectJSON(cmd)
+	}
+	return h(rest)
+}
+
+// helpFor 打印一个动词的说明。认不出来就是打错了，按未知命令处理。
+func helpFor(name string) int {
+	c, ok := findCommand(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "未知命令：%s\n\n", name)
+		printCommands(os.Stderr)
+		return 2
+	}
+	printCommandHelp(os.Stdout, c)
+	return 0
 }
 
 // fail 打印错误并返回退出码 1。

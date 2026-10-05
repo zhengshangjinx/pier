@@ -110,6 +110,21 @@ process group.
 - Cleaning skips services that are currently running: the log fd belongs to that independent
   process, so deleting the file would only unlink it and free the space on exit.
 
+### When something breaks
+
+- The tail of the log is matched against known failures: when one is recognized you get **a reason
+  and a next step** ("dependencies missing" / "run the install step in this service's directory"),
+  along with the original line — "failed to start" on its own would just send you digging through
+  the log, and the port number or module name only exists in that line. The GUI shows it under the
+  failing row; `pier up` / `pier status` print it too.
+- A system notification goes out when a service **exits unexpectedly, exhausts its automatic
+  restarts, or fails to come back up**, carrying the service name, the diagnosed reason, and
+  "restarted automatically N times". Nothing else notifies: not updates, not "checked and
+  found nothing".
+- Notifications can be turned off under Preferences → General (on by default). If one can't be
+  delivered, nothing happens — a revoked notification permission or a Linux box without
+  `notify-send` is not a Pier failure.
+
 ### Updates
 
 - Pier checks GitHub Releases on startup (and every 6 hours after that); a new version puts a dot
@@ -250,8 +265,8 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 3. To use a hand-written manifest instead (kept in your repo, committable, not in the data dir):
 
    ```bash
-   pier --config ./pier.yaml status
-   pier --config ./pier.yaml up
+   pier status --config ./pier.yaml
+   pier up --config ./pier.yaml
    ```
 
 ## Commands
@@ -264,18 +279,45 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier up [service...]` | Start services (all of them when no name is given) |
 | `pier down [service...]` | Stop services |
 | `pier restart [service...]` | Restart services |
-| `pier status` | List every service and its state |
-| `pier ports` | List what is listening on this machine, who started it, and from which directory |
-| `pier logs <service> [-f]` | Show a service's log, `-f` to follow |
-| `pier logs --size` | Show how much disk the logs take |
+| `pier wait <service...>` | Wait until those services are ready (`--timeout 30s`, default 180s) |
+| `pier status [--json]` | List every service and its state |
+| `pier ports [--json]` | List what is listening on this machine, who started it, and from which directory |
+| `pier logs <service>... [-f] [--tail N]` | Show logs, several services at once if you like; `-f` to follow (one service), `--tail` for the line count |
+| `pier logs --size [--json]` | Show how much disk the logs take |
 | `pier logs --clean [service] [--all]` | Remove logs older than 14 days; `--all` clears everything |
 | `pier ui` | Open the interactive terminal panel |
-| `pier api` | Serve a loopback-only HTTP API (`--show-token` / `--rotate` / `--port N`) |
-| `pier version` | Print the version |
+| `pier api` | Serve a loopback-only HTTP API (`--show-token` / `--rotate` / `--port N` / `--addr <host>`) |
+| `pier version` | Print the version (`pier --version` means the same) |
 | `pier update --check` | Check for a newer release without installing: exit code 0 up to date, 10 update available, 1 check failed |
 | `pier update` | Download, verify and swap in the latest release |
 
 Every subcommand accepts `--config <manifest>` to use a YAML manifest instead (read-only).
+It goes **after** the command: a leading `pier --config …` is read as a command that does not exist.
+`-h` / `--help` works on every subcommand too (`pier logs -h`), wherever it sits.
+
+### Machine-readable output
+
+`--json` is accepted by `status` / `ports` / `doctor` / `logs --size`, and only there;
+anywhere else it is rejected outright rather than silently ignored. The fields are the ones the
+GUI reads (`StateOut` and friends in `internal/panel`), whose key names are a public contract
+that only ever grows. Stdout carries nothing but JSON — progress and notices go to stderr —
+so `pier status --json | jq` always works.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Done. For `pier update --check`: already up to date |
+| 1 | Not done: a service failed to start / a probe never passed / a port was taken so the service was skipped / logs were not cleaned / the manifest could not be read / unknown argument |
+| 2 | Unknown command (usually a typo) |
+| 10 | `pier update --check` only: a newer release exists |
+
+For `pier up`, 0 means **every service in the manifest is running**: services skipped because
+their port was taken do not count as success and are listed in their own section at the end.
+`pier down` is the one exception — "not started by Pier" and "already exited" are notices with
+exit code 0, since running `down` twice is supposed to be safe. `pier doctor` always exits 0:
+a missing toolchain only affects the services that need it, so a script that wants to judge
+should read `missing` from `pier doctor --json`.
 
 ## Manifest
 

@@ -517,6 +517,13 @@ body {
 
 .dc-row-err { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 
+/* 出事的原因与下一步。原文另起一行、弱化色：它是证据，不是结论，
+   而且常常很长（Java 的异常栈、构建工具的重试记录），整行省略、全文进 title，
+   不然它会把这一行撑到别的服务那一列去。 */
+.dc-row-diag { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; min-width: 0; }
+.dc-row-diag-why { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+.dc-row-diag-src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 进行中的动作（排队启动、编译中、等待就绪）：主色文字前一个小转圈。
    主按钮这时是能点的「停止」，进度就挪到这一行来说。 */
 .dc-row-op { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; flex: none; }

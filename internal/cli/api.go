@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -83,9 +84,9 @@ func cmdApi(args []string) int {
 	if opt.port == 0 {
 		opt.port = api.Port(settings)
 	}
-	addr := opt.addr
-	if addr == "" {
-		addr = fmt.Sprintf("%s:%d", api.DefaultAddr, opt.port)
+	addr, err := listenAddr(opt)
+	if err != nil {
+		return fail("%v", err)
 	}
 
 	srv := api.New(p, addr, token)
@@ -112,6 +113,54 @@ func cmdApi(args []string) int {
 
 	fmt.Println("按 Ctrl-C 结束。")
 	return codeOrZero(srv.Serve())
+}
+
+// listenAddr 把 --addr 与 --port 合成一个监听地址，并挡住回环之外的地址。
+//
+// 这个接口能启停进程，绑到 0.0.0.0 就等于把「在这台机器上跑什么」交给整个局域网，
+// 而 net.Listen 自己对地址来者不拒——只能在这里拦，而且要拦在起监听之前。
+func listenAddr(opt *apiOptions) (string, error) {
+	host, port := api.DefaultAddr, opt.port
+	if opt.addr != "" {
+		h, p := splitAddr(opt.addr)
+		host = h
+		if p != "" {
+			n, err := strconv.Atoi(p)
+			if err != nil || n <= 0 || n > 65535 {
+				return "", fmt.Errorf("端口要是一个 1~65535 之间的数，收到 %q", p)
+			}
+			port = n
+		}
+	}
+	if !isLoopback(host) {
+		if host == "" {
+			return "", fmt.Errorf("接口只能监听回环地址（127.0.0.1 / ::1 / localhost）：地址里没有主机名，那样会绑到所有网卡上")
+		}
+		return "", fmt.Errorf("接口只能监听回环地址（127.0.0.1 / ::1 / localhost）：「%s」会让同网段的人也能启停你的服务", host)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// splitAddr 拆出 --addr 里的主机与端口。端口可以省略（那时用 --port），
+// 写法上 [::1]:7717 与 ::1 两种都认。
+//
+// 拆不出来的一律当成主机名交给 isLoopback 去拒，这里不另判一次——
+// 两处判断迟早给出两种说法，而用户只需要知道「这个地址不行」。
+func splitAddr(s string) (host, port string) {
+	if h, p, err := net.SplitHostPort(s); err == nil {
+		return h, p
+	}
+	return strings.Trim(s, "[]"), ""
+}
+
+// isLoopback 判断要监听的主机是不是回环。只认字面量，不做 DNS 解析：
+// 一个会去查域名的判定，本身就多出一条能失败的路。
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // baseURL 把监听地址补成能直接粘进浏览器或 curl 的地址。

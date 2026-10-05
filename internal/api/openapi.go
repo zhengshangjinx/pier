@@ -263,6 +263,16 @@ const openAPISpec = `{
               "procs": { "type": "integer" }
             },
             "additionalProperties": true
+          },
+          "diag": {
+            "type": "object",
+            "description": "从日志尾部读出来的「一句原因 + 一句下一步」，只在出事时有：启动失败（opErr 非空）或进程不见了（stale）。认不出来时为 null——宁可不说，也不能猜。",
+            "properties": {
+              "reason": { "type": "string", "description": "一句原因，如「端口被占着」。" },
+              "next": { "type": "string", "description": "一句下一步，如「看是谁占的：pier ports」。" },
+              "line": { "type": "string", "description": "命中的那行原文。端口号、模块名这些字只在它里面，而它们才是「该去改哪一处」的答案。" }
+            },
+            "additionalProperties": true
           }
         }
       },
