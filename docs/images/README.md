@@ -18,8 +18,9 @@ python3 tools/shoot/shoot.py docs/images/overview.png 1382 880
 | `overview.png` | 主界面：服务列表、概览那一排、占用对比 | `tools/shoot/shoot.py docs/images/overview.png 1382 880` |
 | `filter.png` | 页头的搜索与「全部 / 在跑 / 异常」筛选 | `tools/shoot/shoot.py docs/images/filter.png 1382 880 filter shop` |
 | `logs.png` | 日志抽屉：日期选择、搜索高亮、复制全部 | `PIER_SHOT_FIND=shop tools/shoot/shoot.py docs/images/logs.png 1382 880 log demo-admin` |
-| `logs-page.png` | 设置 · 日志：每个服务占多少、可清理 | `tools/shoot/shoot.py docs/images/logs-page.png 1382 880 logsPage` |
+| `logs-page.png` | 设置 · 日志管理：每个服务占多少、可清理 | `tools/shoot/shoot.py docs/images/logs-page.png 1382 880 logsPage` |
 | `sdk.png` | SDK 管理：各类别的 SDK 与「将使用 X，依据 Y」 | `tools/shoot/shoot.py docs/images/sdk.png 1382 880 sdk` |
+| `settings.png` | 偏好设置 · 数据：手上是哪份清单、怎么换一份 | `PIER_SHOT_JS='[...document.querySelectorAll(".dc-set-tab")].find(function(e){return e.textContent==="数据"}).click()' tools/shoot/shoot.py docs/images/settings.png 1382 880 settings` |
 | `dark.png` | 深色主题 | `tools/shoot/shoot.py docs/images/dark.png 1382 880 "" "" dark` |
 | `readonly.png` | 打开一份只读清单（编辑入口收起） | `tools/shoot/shoot.py docs/images/readonly.png 1382 880 readonly` |
 
@@ -27,8 +28,9 @@ python3 tools/shoot/shoot.py docs/images/overview.png 1382 880
 都在 `gui/app.js` 的 `demoState` / `demoCall` 一带，是编的，不指向任何真实项目。
 
 其余可用的弹窗种类（`log` / `occupant` / `add` / `edit` / `portPicker` / `groupNew` /
-`groupRename` / `delete` / `select <分组>` / `quick <all|running|attention>`）见
-`tools/shoot/shoot.py` 的文件头说明。想拍成真实窗口那种排版（页面铺到标题栏底下、
+`groupRename` / `delete` / `select <分组>` / `quick <all|running|attention>` /
+`settings <样子>`）见 `tools/shoot/shoot.py` 的文件头说明。偏好设置页那一栏是页面内
+`useState`，演示钩子够不着，所以上面 `settings.png` 那条靠 `PIER_SHOT_JS` 去点那一栏。想拍成真实窗口那种排版（页面铺到标题栏底下、
 顶上留出 28px 拖拽条）就再加一个 `PIER_SHOT_NATIVE=1`。
 
 ## 发之前先看一眼

@@ -98,9 +98,11 @@ func inEntryGroup(pid int, e *Entry) bool {
 // argv[0] 不参与（见 sys_windows.go），改了只是白改。
 const namingByArgv0 = true
 
-// setDetached 让服务起在自己的会话里（setsid）：
+// SetDetached 让进程起在自己的会话里（setsid）：
 // 不再受当前终端牵制，关掉终端或 Pier 退出都不会把它带走。
-func setDetached(cmd *exec.Cmd) {
+//
+// 另一处用户是自更新的助手：它得在 Pier 已经退出之后接着干活。
+func SetDetached(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 

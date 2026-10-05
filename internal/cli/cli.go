@@ -4,6 +4,8 @@ package cli
 import (
 	"fmt"
 	"os"
+
+	"github.com/zhengshangjinx/pier/internal/update"
 )
 
 const usageText = `Pier —— 统一启停本地多个项目的命令行工具
@@ -25,6 +27,8 @@ const usageText = `Pier —— 统一启停本地多个项目的命令行工具
   logs --clean [服务] 清理超过 14 天的日志（--all 清空，不看天数）
   ui                  打开交互式面板
   api                 起一个只服务本机的 HTTP 接口（--show-token / --rotate / --port N）
+  version             显示版本号
+  update --check      查一下有没有新版本；退出码 0 已是最新，10 有新版本，1 没查成
 
 通用：
   -h, --help          显示本帮助
@@ -65,6 +69,14 @@ func Run(args []string) int {
 		return cmdPorts(rest)
 	case "logs":
 		return cmdLogs(rest)
+	case "version":
+		return cmdVersion(rest)
+	case "update":
+		return cmdUpdate(rest)
+	case update.ApplyVerb:
+		// 隐藏动词：更新助手拿它把「换文件」这件事跑起来。它不是给用户敲的，
+		// 所以不进上面的用法说明——摆在命令表里就得解释一遍它为什么存在。
+		return update.RunHelper(rest)
 	case "-h", "--help", "help":
 		usage()
 		return 0

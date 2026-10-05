@@ -186,7 +186,7 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(c.Path, append(raw, '\n'))
+	return WriteAtomic(c.Path, append(raw, '\n'))
 }
 
 // ServiceYAML 把一条服务渲染成一段能直接贴进 pier.yaml 的片段。
@@ -229,9 +229,12 @@ func (c *Config) ExportYAML() (string, error) {
 	return head + string(raw), nil
 }
 
-// writeAtomic 先写到同目录的临时文件再改名：中途崩溃或断电，
+// WriteAtomic 先写到同目录的临时文件再改名：中途崩溃或断电，
 // 磁盘上要么是旧的完整文件、要么是新的完整文件，不会是半份。
-func writeAtomic(path string, data []byte) error {
+//
+// 导出是给数据目录里的另外几份文件用的（更新状态、更新结果都在那儿）：
+// 数据目录下每一个文件都该用同一把写法，各自写一份迟早有一处漏掉 Sync 或改名。
+func WriteAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("创建数据目录失败：%w", err)
 	}

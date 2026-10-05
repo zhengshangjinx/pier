@@ -17,6 +17,7 @@ import (
 	"github.com/zhengshangjinx/pier/internal/panel"
 	"github.com/zhengshangjinx/pier/internal/proc"
 	"github.com/zhengshangjinx/pier/internal/toolchain"
+	"github.com/zhengshangjinx/pier/internal/update"
 )
 
 // 这些绑定是图形界面的全部入口。窗口里的按钮点不动时，问题多半出在这一层，
@@ -782,6 +783,13 @@ func TestUIFieldNamesExistInBackend(t *testing.T) {
 		// 换算好的 size），所以对的是 panel.LogUsageOut / panel.LogServiceOut。
 		{[]string{"lu"}, keysOf(panel.LogUsageOut{}), "日志占用"},
 		{[]string{"luSvc"}, keysOf(panel.LogServiceOut{}), "日志占用明细"},
+		// 偏好设置页那两块：更新状态与上一次替换的结果。
+		//
+		// 结果那一条必须是另一个变量名：result 是嵌在状态里的一个子结构，
+		// 而 keysOf 只看顶层。写成 up.result.ok 的话，比对的是 update.StatusOut
+		// 上没有的那个 result 键——所以界面里先把它取出来叫 res（见 SettingsPage）。
+		{[]string{"up"}, keysOf(update.StatusOut{}), "更新状态"},
+		{[]string{"res"}, keysOf(update.ApplyResult{}), "更新结果"},
 	}
 
 	for _, tg := range targets {
@@ -913,7 +921,8 @@ func TestOutputStructsTagEveryField(t *testing.T) {
 		"manage.SDKItemOut": manage.SDKItemOut{}, "manage.SDKAddOut": manage.SDKAddOut{},
 		"manage.ToolchainOut": manage.ToolchainOut{},
 		"proc.PortOwner":      proc.PortOwner{}, "proc.Listener": proc.Listener{},
-		"proc.ToolInfo": proc.ToolInfo{},
+		"proc.ToolInfo":       proc.ToolInfo{},
+		"update.StatusOut":    update.StatusOut{}, "update.ApplyResult": update.ApplyResult{},
 	}
 	names := make([]string, 0, len(structs))
 	for n := range structs {

@@ -70,7 +70,18 @@
     sdkRemove: window.pierSDKRemove,
     sdkDefault: window.pierSDKDefault,
     sdkRescan: window.pierSDKRescan,
-    toolchain: window.pierToolchain
+    toolchain: window.pierToolchain,
+    // 更新：查、下、取消、换，以及跳过某一版（见偏好设置页）
+    updateStatus: window.pierUpdateStatus,
+    updateCheck: window.pierUpdateCheck,
+    updateDownload: window.pierUpdateDownload,
+    updateCancel: window.pierUpdateCancel,
+    updateApply: window.pierUpdateApply,
+    updateSkip: window.pierUpdateSkip,
+    updateNotes: window.pierUpdateNotes,
+    updateClearResult: window.pierUpdateClearResult,
+    // 只有「重启并安装」用得上：安排好了、那句话也显示出来了，再把窗口关掉
+    quit: window.pierQuit
   };
 
   var missingBindings = Object.keys(BRIDGE).filter(function (k) {
@@ -395,6 +406,33 @@
       hints: { "47800": "通用 HTTP 备用端口", "47808": "通用备用端口" } };
   }
 
+  // 演示模式下的更新状态。
+  //
+  // 做成一份能被改的：偏好设置页上「有新版本」「下载中」「下载好了」
+  // 「上次换文件失败」这几种样子，靠等是等不出来的（真要去 GitHub 上查一次，
+  // 还得正好有一版新的），而它们恰恰是这一页最需要核对排版的地方。
+  // 出题口见页面末尾的 window.__pierDemo.update。
+  var demoUpdate = null;
+
+  function demoUpdateState() {
+    if (!demoUpdate) {
+      demoUpdate = {
+        current: "0.2.0", latest: "0.3.0", hasUpdate: true, skipped: false,
+        checking: false, downloading: false, done: false,
+        received: 0, total: 0, progress: 0, receivedSize: "0 B", totalSize: "0 B",
+        asset: "Pier-0.3.0-macos-universal.zip", assetSize: "22.1 MB",
+        error: "", checkError: "",
+        result: null,
+        lastCheck: "今天 14:32", publishedAt: "2026-10-01",
+        // 发布说明是多行的：这一格要按原样换行显示，不能挤成一行。
+        notes: "这一版加了自动更新：\n· 启动后自己检查新版本，侧栏上会亮一颗点\n· 界面上直接下载、校验、重启安装",
+        autoCheck: true, canInstall: true,
+        installHint: "这次会替换 /Applications/Pier.app。"
+      };
+    }
+    return demoUpdate;
+  }
+
   async function demoCall(name, args) {
     await new Promise(function (r) { setTimeout(r, 120); });
     switch (name) {
@@ -496,6 +534,52 @@
           : "已改回自动选择" };
       case "sdkRescan": return { ok: true, msg: "已重新扫描" };
       case "toolchain": return demoToolchain(JSON.parse(args[0] || "{}"));
+      case "updateStatus": return demoUpdateState();
+      // 检查要有个在飞的过程，否则「检查更新」按下去看不出任何变化，
+      // 那一格转不转圈正是截图时要看的东西。
+      case "updateCheck":
+        demoUpdateState().checking = true;
+        setTimeout(function () {
+          var u = demoUpdateState();
+          u.checking = false; u.lastCheck = "今天 14:35";
+        }, 900);
+        return { ok: true, msg: "" };
+      case "updateDownload": {
+        var d = demoUpdateState();
+        d.downloading = true; d.error = "";
+        d.total = 23173530;
+        var step = function (got) {
+          var u = demoUpdateState();
+          if (!u.downloading) return;
+          u.received = got; u.progress = Math.round(got * 100 / u.total);
+          u.receivedSize = (got / 1048576).toFixed(1) + " MB";
+          u.totalSize = "22.1 MB";
+          if (got < u.total) setTimeout(function () { step(got + 3400000); }, 220);
+          else { u.downloading = false; u.done = true; u.progress = 100;
+            u.receivedSize = "22.1 MB"; }
+        };
+        setTimeout(function () { step(900000); }, 220);
+        return { ok: true, msg: "" };
+      }
+      case "updateCancel": {
+        var c = demoUpdateState();
+        c.downloading = false; c.received = 0; c.progress = 0; c.receivedSize = "0 B";
+        return { ok: true, msg: "" };
+      }
+      case "updateApply": return { ok: true,
+        msg: "更新已经安排好了，换文件的过程写在 /Users/you/.pier/logs/update/2026-10-01.log 里。" };
+      case "updateSkip": return { ok: true, msg: args[0] ? "这一版不再提示" : "恢复提示" };
+      case "updateClearResult": demoUpdateState().result = null; return { ok: true, msg: "" };
+      case "updateNotes": return { ok: true, msg: "" };
+      case "quit": return { ok: true, msg: "" };
+      case "saveSettings":
+        // 开关改完立刻反映到状态里：这一页上的开关和后端那份偏好必须是同一个事实，
+        // 演示模式下也让它们对得上。
+        if (args[0]) {
+          var patch = JSON.parse(args[0]);
+          if (patch.updateCheck !== undefined) demoUpdateState().autoCheck = !!patch.updateCheck;
+        }
+        return { ok: true, msg: "" };
       case "createGroup": return { ok: true, msg: "已新建分组「" + args[0] + "」" };
       case "renameGroup": return { ok: true, msg: "已把分组「" + args[0] + "」改名为「" + args[1] + "」" };
       case "deleteGroup": return { ok: true, msg: "已删除分组「" + args[0] + "」" };
@@ -542,6 +626,14 @@
   // 多跑三分钟，且这三分钟里用户正盯着界面等结果，这个代价是值的。
   var STATE_POLL_MS = 5000;
   var STATE_POLL_BUSY_MS = 1000;
+
+  // 更新状态的轮询间隔。它和服务状态那两档不是一回事：这条问的是本机
+  // 「查到哪一版、下到哪儿了」，一次本地绑定调用，不出网——真正出网的检查
+  // 六小时才一次（见 internal/update 的 AutoEvery）。
+  //
+  // 闲时一分钟一问是为了让侧栏那颗圆点自己冒出来：自动检查在后台查到新版本时
+  // 没有任何东西通知页面，只有这条轮询能把它带上来。
+  var UPDATE_POLL_MS = 60000;
 
   // 状态点的配色。键来自 internal/view 的 statusKey，加状态时两边要一起加。
   //
@@ -647,6 +739,10 @@
   var IconChip = function (p) { return html`<${Ico} ...${p}><rect x="4.5" y="4.5" width="7" height="7" rx="1.5"/><path d="M6.6 2.6v1.9M9.4 2.6v1.9M6.6 11.5v1.9M9.4 11.5v1.9M2.6 6.6h1.9M2.6 9.4h1.9M11.5 6.6h1.9M11.5 9.4h1.9"/><//>`; };
   var IconSearch = function (p) { return html`<${Ico} ...${p}><circle cx="7.2" cy="7.2" r="4.1"/><path d="M10.3 10.3l3.2 3.2"/><//>`; };
   var IconCopy = function (p) { return html`<${Ico} ...${p}><rect x="5.6" y="2.6" width="7.8" height="7.8" rx="1.6"/><path d="M10.4 10.4v1.4a1.6 1.6 0 0 1-1.6 1.6H4.2a1.6 1.6 0 0 1-1.6-1.6V7.2a1.6 1.6 0 0 1 1.6-1.6h1.4"/><//>`; };
+  // 齿轮：八颗齿的轮盘加一个轴孔。齿是折线不是圆弧——16px 上弧线看不出来，
+  // 而折线的每个转角都被 Ico 的 stroke-linejoin 磨圆，正好是齿轮的样子。
+  var IconGear = function (p) { return html`<${Ico} ...${p}><path d="M14.5 8l-2.25 1.76.28 2.83-2.77-.33L8 14.5l-1.76-2.24-2.77.33.28-2.83L1.5 8l2.25-1.76-.28-2.83 2.77.33L8 1.5l1.76 2.24 2.77-.33-.28 2.83z"/><circle cx="8" cy="8" r="2.2"/><//>`; };
+  var IconDownload = function (p) { return html`<${Ico} ...${p}><path d="M8 2.2v7.4"/><path d="M4.9 6.8L8 9.9l3.1-3.1"/><path d="M2.6 11.2v1.7a1.5 1.5 0 0 0 1.5 1.5h7.8a1.5 1.5 0 0 0 1.5-1.5v-1.7"/><//>`; };
 
   // 品牌标记：和应用图标（tools/mkicon）同一套几何，改动时两处一起对。
   //
@@ -718,7 +814,10 @@
         try { localStorage.setItem(THEME_KEY, v); } catch (err) { /* 隐私模式下写不进去，不影响使用 */ }
         return;
       }
-      call("saveSettings", v).catch(function (ex) { console.error("Pier 界面：保存主题失败", ex); });
+      // 送一份补丁而不是一个位置参数：settings.json 里还有「SDK 管理」那一摊，
+      // 而这一句只知道自己改了主题。再加设置项时不必再动这里。
+      call("saveSettings", JSON.stringify({ theme: v }))
+        .catch(function (ex) { console.error("Pier 界面：保存主题失败", ex); });
     };
     var dark = pref === "dark" || (pref === "system" && sysDark);
     return { pref: pref, set: set, dark: dark };
@@ -3036,6 +3135,319 @@
     <//>`;
   }
 
+  // ── 偏好设置 ─────────────────────────────────────────────────────────────
+  //
+  // 侧栏页脚那一行打开的页面。更新状态由 App 轮询之后传下来，这一页不再起第二个
+  // 定时器：两处各轮一次，迟早一前一后对不上，侧栏那颗圆点就会和这一页说的
+  // 不是同一件事。
+  //
+  // 这里只做排版：什么算有新版本、能不能替换自己、失败是什么原因，全在
+  // internal/update 里定，后端给什么就摆什么。
+
+  function SettingsPage(props) {
+    // 变量名不能改叫别的：gui/app_test.go 的 TestUIFieldNamesExistInBackend
+    // 按变量名比对字段，up 上挂的是 update.StatusOut，data 上挂的是 panel.StateOut
+    // （「数据」那一栏读的 configPath / configDir / configSource / readOnly 都在后者里）。
+    var up = props.up;
+    var data = props.data;
+    var th = props.th;
+    var token = A.theme.useToken().token;
+    var sm = { fontSize: token.fontSizeSM, color: token.colorTextTertiary };
+    // 左栏停在哪个分类是页面内的临时状态，不落盘：它记的是「刚才在看哪一栏」，
+    // 不是什么偏好。重开一次回到「通用」，正是应该的。
+    var sec = React.useState("general"), tab = sec[0], setTab = sec[1];
+    var bs = React.useState(""), busy = bs[0], setBusy = bs[1];
+
+    // 每个动作跑完都把状态重读一遍，而不是在前端自己改一份：自己改出来的那份
+    // 迟早和后端对不上，而这一页说的每一句都该是后端刚算出来的。
+    var run = async function (key, fn) {
+      setBusy(key);
+      try { await fn(); } catch (ex) { props.message.error(ex.message); }
+      setBusy("");
+      props.reload();
+    };
+
+    // 「数据」那一栏的几个动作另有一步：刷的是面板状态（props.refresh），
+    // 不是上面那份更新状态。换一份清单、清掉一批残留记录之后，侧栏的服务列表、
+    // 主区的标题和数字全都要跟着重算，只刷本页会让它们停在上一份数据上。
+    var runSrc = async function (key, fn) {
+      setBusy(key);
+      try { await fn(); } catch (ex) { props.message.error(ex.message); }
+      setBusy("");
+      props.refresh();
+    };
+
+    var saveAuto = async function (v) {
+      setBusy("auto");
+      try { await call("saveSettings", JSON.stringify({ updateCheck: !!v })); }
+      catch (ex) { props.message.error(ex.message); }
+      setBusy("");
+      props.reload();
+    };
+
+    // 换文件只有这一条路：助手等 Pier 退出、换、再拉回来。
+    //
+    // 顺序要摆对——先把「已经安排好了」显示出来，过一会儿再关窗口。反过来的话，
+    // 用户看到的就是「点了一下，窗口没了」，而这次的安排写在哪儿一句都没说。
+    var apply = async function () {
+      setBusy("apply");
+      try {
+        var r = await call("updateApply");
+        props.message.success(r.msg || "更新已经安排好了");
+        setTimeout(function () { call("quit").catch(function () {}); }, 800);
+      } catch (ex) {
+        props.message.error(ex.message);
+        setBusy("");
+        props.reload();
+      }
+    };
+
+    var showNotes = function () {
+      call("updateNotes").catch(function (ex) { props.message.error(ex.message); });
+    };
+
+    var row = function (label, value, extra) {
+      return html`<div className="dc-set-row">
+        <span className="dc-set-key" style=${sm}>${label}</span>
+        <span className="dc-set-val">${value}${extra || null}</span>
+      </div>`;
+    };
+
+    // 下载或解压那一步的失败原因。检查失败（网络不通）不走这里，它只是
+    // 页面上的一句话，不弹框——下次到点会自己再试。
+    var updAlert = up && up.error && !up.checking && !up.downloading && !up.done
+      ? html`<${A.Alert} type="warning" showIcon className="dc-card-alert" message=${up.error}/>`
+      : null;
+
+    // 换了这一版之后的那一块。四种样子互斥：下载好了 / 正在下 / 跳过了 / 可以下。
+    var updBody = null;
+    if (up && up.hasUpdate && up.canInstall) {
+      if (up.done) {
+        updBody = html`<${React.Fragment}>
+          <div className="dc-set-note-head">${up.latest + " 已经下载好了"}</div>
+          <div style=${sm}>点下去 Pier 会退出，替换完成后自己回来。</div>
+          <${A.Button} type="primary" icon=${e(IconRestart)} loading=${busy === "apply"}
+            onClick=${apply}>重启并安装<//>
+        </${React.Fragment}>`;
+      } else if (up.downloading) {
+        updBody = html`<${React.Fragment}>
+          <div className="dc-set-note-head">${"正在下载 " + up.latest}</div>
+          ${"" /* 服务端没给总量时不画进度条：一条不动的空条比没有条更让人以为卡住了。 */}
+          ${up.total > 0 ? html`<${A.Progress} percent=${up.progress} showInfo=${false}/>` : null}
+          <div style=${sm}>${(up.total > 0 ? up.receivedSize + " / " + up.totalSize
+            : "已下载 " + up.receivedSize) + (hasVal(up.asset) ? " · " + up.asset : "")}</div>
+          <${A.Button} onClick=${function () {
+            run("cancel", function () { return call("updateCancel"); });
+          }}>取消<//>
+        </${React.Fragment}>`;
+      } else if (up.skipped) {
+        updBody = html`<${React.Fragment}>
+          <div className="dc-set-note-head">${"已跳过 " + up.latest}</div>
+          <div style=${sm}>不再提示这一版；出了更新的版本还会照常提示。</div>
+          <${A.Button} onClick=${function () {
+            run("skip", function () { return call("updateSkip", ""); });
+          }}>不再跳过<//>
+        </${React.Fragment}>`;
+      } else {
+        updBody = html`<${React.Fragment}>
+          <div className="dc-set-note-head">
+            ${up.latest + " 已发布" + (hasVal(up.publishedAt) ? " · " + up.publishedAt : "")}</div>
+          ${hasVal(up.notes) ? html`<div className="dc-set-notes" style=${sm}>${up.notes}</div>` : null}
+          <${A.Space}>
+            <${A.Button} type="primary" icon=${e(IconDownload)} loading=${busy === "download"}
+              onClick=${function () {
+                run("download", function () { return call("updateDownload"); });
+              }}>${up.error ? "重试下载" : "下载更新"}<//>
+            <${A.Button} onClick=${function () {
+              run("skip", function () { return call("updateSkip", up.latest); });
+            }}>跳过这个版本<//>
+          <//>
+        </${React.Fragment}>`;
+      }
+    }
+
+    var version = !up ? html`<${A.Skeleton} active paragraph=${{ rows: 3 }}/>` : html`<${React.Fragment}>
+      ${row("当前版本", hasVal(up.current) ? up.current : "-")}
+      ${row("最新版本", hasVal(up.latest) ? up.latest : "-",
+        up.hasUpdate
+          ? html`<${A.Tag} color="processing">有新版本<//>`
+          : hasVal(up.latest) ? html`<span style=${sm}>已是最新</span>` : null)}
+      ${row("上次检查", hasVal(up.lastCheck) ? up.lastCheck : "还没有查过")}
+      ${up.checkError ? html`<div className="dc-set-hint" style=${{ color: token.colorWarning }}>
+        ${"上次没能问到：" + up.checkError}</div>` : null}
+      <${A.Space} className="dc-set-acts">
+        <${A.Button} icon=${e(IconRefresh)} loading=${busy === "check"}
+          onClick=${function () {
+            run("check", function () { return call("updateCheck"); });
+          }}>检查更新<//>
+        <${A.Button} type="text" className="dc-quiet" onClick=${showNotes}>查看发布说明<//>
+      <//>
+    </${React.Fragment}>`;
+
+    // 换不了自己的那两种（自己编的、go install 装的）：不摆「下载更新」按钮。
+    // 装不上却让人先花几分钟下几十兆，是骗人的；原因就在卡片副标题上。
+    var noInstall = up && up.hasUpdate && !up.canInstall;
+
+    var general = html`<${React.Fragment}>
+      <section className="dc-card">
+        <div className="dc-card-head">
+          <span className="dc-card-title">版本</span>
+          <span className="dc-card-sub">${up ? up.installHint : "正在读取…"}</span>
+        </div>
+        ${updAlert}
+        ${version}
+        ${updBody ? html`<div className="dc-set-note"
+          style=${{ background: token.colorFillTertiary }}>${updBody}</div>` : null}
+        ${noInstall ? html`<${A.Alert} type="info" showIcon className="dc-card-alert"
+          message="这一份 Pier 不会自己替换自己"
+          description="新版本可以从发布页手动装一次，装的时候会盖掉同一位置上的那一份。"/>` : null}
+      </section>
+
+      <section className="dc-card">
+        <div className="dc-card-head">
+          <span className="dc-card-title">自动检查</span>
+          <span className="dc-card-sub">隔几小时问一次 GitHub，有新版本就在侧栏亮一颗点</span>
+        </div>
+        <div className="dc-set-row">
+          <span className="dc-set-key">自动检查更新</span>
+          <span className="dc-set-flex"/>
+          <${A.Switch} checked=${up ? up.autoCheck : true} loading=${busy === "auto"}
+            onChange=${saveAuto}/>
+        </div>
+        <div className="dc-set-hint" style=${sm}>关掉之后只是不再自己去问；上面的「检查更新」随时可用。</div>
+      </section>
+    </${React.Fragment}>`;
+
+    var appearance = html`<section className="dc-card">
+      <div className="dc-card-head">
+        <span className="dc-card-title">主题</span>
+        <span className="dc-card-sub">跟随系统时会随系统外观切换</span>
+      </div>
+      <${A.Segmented} value=${th.pref} onChange=${th.set}
+        options=${THEMES.map(function (t) { return { value: t.key, label: t.label, icon: e(t.icon, { size: 13 }) }; })}/>
+    </section>`;
+
+    // 「数据」那一栏：手上这份清单在哪、怎么把它带走、怎么换一份，以及进程记录的收尾。
+    //
+    // 前四件事原来挤在顶栏的「⋯」里——主区每时每刻最显眼的那一排摆着一颗和启停无关的
+    // 按钮，而点开之后是一组「关于这份数据」的操作，跟当时屏幕上那一页的服务没关系。
+    // 挪到这里之后顶栏只剩启停与添加（那两件确实是按页生效的），而这一页本来
+    // 就只在要改设置的时候才打开。
+    //
+    // 代价是清楚的：打开只读清单之后，那一页上不再有一眼可见的「现在看的是哪一份」。
+    // 所以只读时主区顶上那条告警里写着去哪儿切回来，这一栏里那份是完整的。
+    var cfgReadOnly = !!(data && data.readOnly);
+    var cfgPath = (data && data.configPath) || "";
+    var cfgDir = (data && data.configDir) || "";
+    // 只读时写文件名，本机数据时写「本机数据」：一个是「这份 YAML」，一个是
+    // 「你自己那套」，指名的说法不一样。取文件名要按 / 切，清单路径一律是绝对路径。
+    var cfgName = cfgReadOnly ? cfgPath.split("/").pop() : "本机数据";
+    // 主目录写成 ~：数据目录就是 ~/.pier，完整的 /Users/xxx/.pier 在这一行里
+    // 只会被截断成前几个目录。只读那份在哪儿就照实写——它不是数据目录。
+    var cfgShort = cfgDir.replace(/^\/Users\/[^/]+/, "~");
+
+    var manifest = html`<${React.Fragment}>
+      <section className="dc-card">
+        <div className="dc-card-head">
+          <span className="dc-card-title">清单</span>
+          <span className="dc-card-sub">这份清单在哪、怎么带走、怎么换一份</span>
+        </div>
+        <div className="dc-set-row">
+          <span className="dc-set-key" style=${sm}>数据来源</span>
+          <span className="dc-set-val">
+            <span className="dc-src" title=${cfgPath ? cfgName + " · " + cfgPath : cfgName}>
+              <span className="dc-src-name">${cfgName}</span>
+              ${"" /* 来源只在不寻常时才标：平时就是「本机数据」，和名字重复。 */}
+              ${data && data.configSource && data.configSource !== "本机数据" ? html`<span
+                className="dc-src-tag" style=${{ background: token.colorFillTertiary }}
+                >${data.configSource}</span>` : null}
+              ${cfgShort ? html`<span className="dc-src-dir dc-mono" title=${cfgDir}>${cfgShort}</span>` : null}
+            </span>
+          </span>
+          <${A.Button} icon=${e(IconFolder)} loading=${busy === "reveal"}
+            onClick=${function () {
+              runSrc("reveal", function () { return call("revealConfig"); });
+            }}>${cfgReadOnly ? "在" + FILEMGR + "中显示清单" : "打开数据目录"}<//>
+        </div>
+        <${A.Space} className="dc-set-acts">
+          <${A.Button} icon=${e(IconDoc)} loading=${busy === "yaml"}
+            onClick=${function () {
+              runSrc("yaml", async function () {
+                var y = await call("configYAML");
+                await call("copyText", y.text);
+                props.message.success("已复制清单 YAML");
+              });
+            }}>复制成 YAML<//>
+          <${A.Button} icon=${e(IconLayers)} loading=${busy === "export"}
+            onClick=${function () {
+              runSrc("export", async function () {
+                var r = await call("exportConfig");
+                props.message.success(r.canceled ? "已取消" : (r.msg || "已导出"));
+              });
+            }}>导出清单…<//>
+          <${A.Button} icon=${e(IconFolder)} loading=${busy === "open"}
+            onClick=${function () {
+              runSrc("open", async function () {
+                var r = await call("openConfig");
+                props.message.success(r.canceled ? "已取消" : (r.msg || "已打开"));
+              });
+            }}>打开清单…<//>
+          ${"" /* 选错了要能退回来：打开的如果是 YAML，整份就只读、编辑入口全收起，
+                 而没有这一颗的话，双击启动的人只能重启一次 Pier。 */}
+          ${cfgReadOnly ? html`<${A.Button} icon=${e(IconLayers)} loading=${busy === "local"}
+            onClick=${function () {
+              runSrc("local", async function () {
+                var r = await call("useLocalConfig");
+                props.message.success(r.msg || "已切回本机数据");
+              });
+            }}>回到本机数据<//>` : null}
+        <//>
+      </section>
+
+      <section className="dc-card">
+        <div className="dc-card-head">
+          <span className="dc-card-title">维护</span>
+          <span className="dc-card-sub">进程记录与实际对不上时的手工收尾</span>
+        </div>
+        <div className="dc-set-row">
+          <span className="dc-set-key" style=${sm}>残留记录</span>
+          <span className="dc-set-flex"/>
+          <${A.Button} icon=${e(IconBroom)} loading=${busy === "prune"}
+            onClick=${function () {
+              runSrc("prune", async function () {
+                var r = await call("prune");
+                props.message.success(r.msg || "已清理");
+              });
+            }}>清理<//>
+        </div>
+        <div className="dc-set-hint" style=${sm}>
+          服务崩溃、或被手工结束之后，状态文件里会留下一条指向已死进程的记录，
+          界面上那条服务就会一直显成在跑。走「停止」消失的进程后端会顺手清掉，
+          这里是没有走过「停止」时的那条路。
+        </div>
+      </section>
+    </${React.Fragment}>`;
+
+    var tabs = [["general", "通用"], ["appearance", "外观"], ["data", "数据"]];
+
+    return html`<div className="dc-set">
+      <div className="dc-set-tabs">
+        ${tabs.map(function (it) {
+          return html`<div key=${it[0]}
+            className=${"dc-set-tab" + (tab === it[0] ? " is-on" : "")}
+            onClick=${function () { setTab(it[0]); }}>${it[1]}</div>`;
+        })}
+      </div>
+      ${"" /* 上一次替换的结果不在这儿再摆一份：主区顶上已经有一条（见 App 里的
+             res），而这一页就在主区里——同一句话并排出现两次，读的人会以为
+             出了两次事。换完文件重新起来落在的是服务列表，那条告警跟着走，
+             在哪儿都看得见。 */}
+      <div className="dc-set-body">
+        ${tab === "appearance" ? appearance : tab === "data" ? manifest : general}
+      </div>
+    </div>`;
+  }
+
   // ── 主界面 ───────────────────────────────────────────────────────────────
 
   function App(props) {
@@ -3118,6 +3530,59 @@
       // 窗口从后台回到前台时立刻刷一次：不可见期间刷新是停着的，
       // 等下一跳轮询的话，切回来会先看到最多 5 秒前的旧状态（刚启动时就是一片骨架屏）。
       var onVisible = function () { if (!document.hidden && alive) refreshRef.current(); };
+      document.addEventListener("visibilitychange", onVisible);
+      return function () {
+        alive = false; clearTimeout(t);
+        document.removeEventListener("visibilitychange", onVisible);
+      };
+    }, []);
+
+    // 更新状态。与上面那条轮询并列，但两者说的不是一件事：那条读的是服务进程，
+    // 这条读的是「有没有新版本」。分开两条而不是合并成一个绑定，是因为间隔不同——
+    // 服务列表 5 秒一跳，而更新状态跳一次读一遍 settings.json，没必要陪着一起跑。
+    //
+    // 这一条不出网：真正去问 GitHub 的那次在 Go 的后台协程里，这里只是把结果取回来。
+    // 所以间隔按本地调用的尺度给——平时一分钟一跳，只为让侧栏那颗圆点自己出现；
+    // 正在检查或下载时一秒一跳，那条进度条得动起来。
+    //
+    // 状态只有这一份：侧栏页脚那颗圆点与偏好设置页读的是同一个 up，
+    // 两处各轮一次迟早一前一后对不上，页面上说的和圆点亮的就不是同一件事。
+    var us = React.useState(null), up = us[0], setUp = us[1];
+    // 上一次替换留下的结果。变量名必须是 res：gui/app_test.go 按变量名比对字段，
+    // 而 result 那一层是 update.ApplyResult，不在 StatusOut 里。
+    //
+    // 这是「上次更新成没成」唯一的去处：助手跑在 Pier 已经退出的空档里，
+    // 没有窗口能报错，它只能把这句写进结果文件等下一次启动。所以主区顶上摆一条，
+    // 偏好设置页里也有一份（见那一页）——换完文件重新起来落在的是服务列表。
+    var res = (up && up.result) || null;
+    var upBusyRef = React.useRef(false);
+    var upRefresh = async function () {
+      if (document.hidden) return;
+      try {
+        var d = await call("updateStatus");
+        setUp(d);
+        upBusyRef.current = !!(d && (d.checking || d.downloading));
+      } catch (ex) {
+        // 读不到更新状态不该在主界面上报错：它既不影响启停，也不影响日志，
+        // 让人为此看到一条红字只会以为 Pier 坏了。偏好设置页那边会看到空白。
+        console.error("Pier 界面：读取更新状态失败", ex);
+      }
+    };
+    var upRefreshRef = React.useRef(upRefresh);
+    upRefreshRef.current = upRefresh;
+
+    // 与上面那条同一个写法：循环只在挂载时建一次，间隔按上一跳的结果重算。
+    React.useEffect(function () {
+      var alive = true;
+      var t = null;
+      var tick = async function () {
+        if (alive) await upRefreshRef.current();
+        if (!alive) return;
+        t = setTimeout(tick, upBusyRef.current && !document.hidden
+          ? STATE_POLL_BUSY_MS : UPDATE_POLL_MS);
+      };
+      tick();
+      var onVisible = function () { if (!document.hidden && alive) upRefreshRef.current(); };
       document.addEventListener("visibilitychange", onVisible);
       return function () {
         alive = false; clearTimeout(t);
@@ -3436,12 +3901,17 @@
     // 点下去和眼前这一页毫无关系。
     var SDK_KEY = "__sdk";
     var LOG_KEY = "__logs";
+    var SETTINGS_KEY = "__settings";
     var onSDKPage = selected === SDK_KEY;
     var onLogPage = selected === LOG_KEY;
-    var onToolPage = onSDKPage || onLogPage;
+    // 偏好设置页不在「设置」那一节里（它在侧栏页脚），但页头的规矩一样：
+    // 说的都是本机的东西，不是某一组服务，所以启停按钮与副标题的计数同样撤掉。
+    var onSettingsPage = selected === SETTINGS_KEY;
+    var onToolPage = onSDKPage || onLogPage || onSettingsPage;
 
     var title = onSDKPage ? "SDK 管理"
-      : onLogPage ? "日志"
+      : onLogPage ? "日志管理"
+      : onSettingsPage ? "偏好设置"
       : (selected === "all" ? "全部服务" : (cur ? cur.name : selected));
 
     // 骨架的底色由这里出，不交给 antd 的 Layout/Sider 自己算。
@@ -3527,8 +3997,8 @@
         // 深浅两套要各拍一遍。主题平时只由侧栏的 Segmented 切，
         // 而从 file:// 打开的预览页没法预先写 localStorage，所以留个口子。
         theme: function (v) { th.set(v); },
-        // 只读清单（命令行 --config，或者「⋯ → 打开清单…」）平时要看一眼得真去
-        // 启动一次。翻的是上面那两个模块变量，也就是 demoState 的出题口，
+        // 只读清单（命令行 --config，或者偏好设置里那个「打开清单…」）平时要看一眼
+        // 得真去启动一次。翻的是上面那两个模块变量，也就是 demoState 的出题口，
         // 这样每 5 秒那一跳取回来的还是只读的那一份。
         // 第二个参数是来源，用来分别拍「命令行指定」和「打开清单…」那两种说法。
         // 直接摆一份新的上去，不走 refresh：那条路要等一次异步的 state 回来，
@@ -3537,6 +4007,49 @@
           demoReadOnly = on !== false;
           demoReadOnlySrc = src || "";
           setData(demoState());
+        },
+        // 偏好设置页的那几种样子：有新版本、下载中、下载好了、跳过了、
+        // 下载失败、查失败、上次换文件失败。真要去 GitHub 上查一次、
+        // 再正好赶上一版新的才看得到，而它们正是这一页最需要核对排版的地方。
+        //
+        // 直接摆一份上去并当场重渲染，不等下一跳轮询：后台标签页里
+        // setTimeout 被节流到秒级，截图的人等不到它。
+        update: function (kind) {
+          var u = demoUpdateState();
+          // 每一种都从「有新版本、还没下」那个底子重来，免得上一回摆下的
+          // done / error 还挂在上面，两张截图叠在一起分不清是谁的。
+          u.skipped = false; u.downloading = false; u.done = false;
+          u.error = ""; u.checkError = ""; u.result = null;
+          u.received = 0; u.total = 0; u.progress = 0;
+          u.receivedSize = "0 B"; u.totalSize = "0 B";
+          u.hasUpdate = true; u.latest = "0.3.0"; u.autoCheck = true; u.canInstall = true;
+          if (kind === "downloading") {
+            u.downloading = true; u.total = 23173530;
+            u.received = 12976128; u.progress = 56;
+            u.receivedSize = "12.4 MB"; u.totalSize = "22.1 MB";
+          } else if (kind === "done") {
+            u.done = true; u.progress = 100;
+            u.received = 23173530; u.total = 23173530;
+            u.receivedSize = "22.1 MB"; u.totalSize = "22.1 MB";
+          } else if (kind === "skipped") {
+            u.skipped = true;
+          } else if (kind === "failed") {
+            u.error = "下载 0.3.0 失败：连接被对方重置（已重试 5 次）";
+          } else if (kind === "checkfail") {
+            u.checkError = "连不上 api.github.com：dial tcp 140.82.113.6:443: i/o timeout";
+          } else if (kind === "nostall") {
+            u.canInstall = false;
+            u.installHint = "这一份 Pier 是从源码编译的，不会自己替换自己。";
+          } else if (kind === "latest") {
+            u.hasUpdate = false; u.latest = "0.2.0";
+          } else if (kind === "result") {
+            u.result = { ok: false, version: "0.3.0", rolledBack: true, when: "2026-10-01T14:40:12+08:00",
+              message: "换文件的时候失败了：解开的新版本里没有 Pier.app 的 Contents/Info.plist" };
+          } else if (kind === "resultOk") {
+            u.result = { ok: true, version: "0.3.0", rolledBack: false, when: "2026-10-01T14:40:12+08:00",
+              message: "换文件的过程写在 /Users/you/.pier/logs/update/2026-10-01.log 里。" };
+          }
+          setUp(Object.assign({}, u));
         },
         open: function (kind, arg) {
           if (kind === "log") setLog({ open: true, name: arg || "demo-admin" });
@@ -3577,6 +4090,11 @@
             setSelected("__sdk");
           } else if (kind === "logsPage") {
             setSelected("__logs");
+          } else if (kind === "settings") {
+            // 第二个参数顺带把更新那一块摆成指定的一种样子（见上面 update），
+            // 截图时「点开这一页」和「这一页上是什么状态」是同一步。
+            setSelected("__settings");
+            if (arg) window.__pierDemo.update(arg);
           } else if (kind === "readonly") {
             window.__pierDemo.readonly(true, arg || "");
           }
@@ -3625,11 +4143,9 @@
         : ((groups.filter(function (g) { return g.name === selected; })[0] || {}).usage))
       : sumUsage(shownServices);
 
+    // 只读告警里要写出那份 YAML 的完整路径。名字、目录那几样的说法在偏好设置页里
+    // （见 SettingsPage 的「数据」一栏）——主区这边不再展示「现在看的是哪份数据」。
     var cfgPath = (data && data.configPath) || "";
-    var cfgName = readOnly ? cfgPath.split("/").pop() : "本机数据";
-    var cfgDir = (data && data.configDir) || "";
-    // 主目录写成 ~：数据目录就是 ~/.pier，完整的 /Users/xxx/.pier 在这一小格里只会被截断。
-    var cfgShort = cfgDir.replace(/^\/Users\/[^/]+/, "~");
 
     // 一批服务一起启停。只有这一份实现：分组标题行那对按钮和顶栏那对按钮
     // 走的是同一个函数，两处各写一遍的话，「停止要不要确认」这类规矩
@@ -3745,7 +4261,7 @@
     var sm = { fontSize: token.fontSizeSM, color: token.colorTextTertiary };
 
     // 搜索与快捷筛选那一行。摆在页头标题下面、列表上面，而不是塞进右边那排按钮里：
-    // 窗口窄下来时那一排（⋯ / 启停 / 添加应用）本来就占满了，再挤进一个输入框和
+    // 窗口窄下来时那一排（启停 / 从端口添加 / 添加应用）本来就占满了，再挤进一个输入框和
     // 三个选项，先被顶出窗口的会是「添加应用」。放在页头里也不跟着列表滚走，
     // 筛完往下翻还能看见自己筛了什么。
     //
@@ -3817,16 +4333,40 @@
                     <span className="dc-nav-name">SDK 管理</span></span>` },
                 { key: LOG_KEY, icon: html`<span className="dc-nav-dot">${e(IconDoc)}</span>`,
                   label: html`<span className="dc-nav-row">
-                    <span className="dc-nav-name">日志</span></span>` }
+                    <span className="dc-nav-name">日志管理</span></span>` }
               ]}
             ]}/>
         </div>
 
-        <div className="dc-side-foot">
-          ${"" /* 「现在看的是哪份数据」不再挂在这儿，挪进了顶栏「⋯」——见那边开头的注释。
-                 页脚只剩主题这一行：它不跟着数据走，是纯界面偏好，收尾的地方留给它正合适。 */}
-          <${A.Segmented} block value=${th.pref} onChange=${th.set}
-            options=${THEMES.map(function (t) { return { value: t.key, label: t.label, icon: e(t.icon, { size: 13 }) }; })}/>
+        <div className="dc-side-foot" style=${{ borderTop: "1px solid " + token.colorSplit }}>
+          ${"" /* 页脚只有这一行入口。「现在看的是哪份数据」那件事（以及跟着它的
+                 复制成 YAML / 导出清单… / 打开清单… / 清理残留记录）在它打开的
+                 那一页里（见 SettingsPage 的「数据」一栏），不再占着主区的顶栏。
+                 仍然用一个 Menu 而不是自己画一行：选中态、悬停底色、图标对齐都和
+                 上面那两节一模一样，而自绘的每一处都要各自对齐一次。
+
+                 文案用「偏好设置」而不是「设置」：上面已经有一节叫「设置」
+                 （SDK 管理 / 日志管理），同名并列会让人以为点进去是同一处。 */}
+          <${A.Menu} mode="inline" selectedKeys=${[selected]} style=${{ borderInlineEnd: 0 }}
+            onClick=${function (mi) { setSelected(mi.key); }}
+            items=${[{
+              key: SETTINGS_KEY,
+              icon: html`<span className="dc-nav-dot">${e(IconGear)}</span>`,
+              label: html`<span className="dc-nav-row">
+                <span className="dc-nav-name">偏好设置</span>
+                ${"" /* 右边这一格平时是当前版本；有新版本时换成主色的圆点加最新版本号——
+                       自动更新最怕的就是「查过了，而没人知道」，不点进去也看得见。 */}
+                ${up && up.hasUpdate && !up.skipped
+                  ? html`<span className="dc-set-ver is-new" style=${{ color: token.colorPrimary }}
+                      title=${"有新版本 " + up.latest + "，点开查看"}>
+                      <span className="dc-set-dot" style=${{ background: token.colorPrimary }}/>
+                      <span>${up.latest}</span>
+                    </span>`
+                  : html`<span className="dc-set-ver" title="当前版本">
+                      ${up && hasVal(up.current) ? up.current : ""}
+                    </span>`}
+              </span>`
+            }]}/>
         </div>
       <//>
 
@@ -3836,12 +4376,15 @@
             <div style=${{ minWidth: 0 }}>
               <div className="dc-head-title" style=${{ fontSize: token.fontSizeHeading4 }}>${title}</div>
               ${"" /* 副标题压到 12px 的弱化色：它只是计数之类的元信息，不该和标题抢同等分量。
-                     看的是哪份清单挪到了「⋯」里，这里只说「现在怎么样」。 */}
+                     它说的是「这一页现在怎么样」，不是「你看的是哪份清单」——后者在
+                     偏好设置的「数据」一栏里。 */}
               <div className="dc-head-sub" style=${sm}>
                 ${onSDKPage
                   ? "本机扫到的 SDK · 服务上单独指定的优先级更高"
                   : onLogPage
                   ? "一个服务一个目录、一天一个文件 · 启动时自动清理超期日志"
+                  : onSettingsPage
+                  ? "更新、外观与清单 · 都存在本机数据目录里"
                   : (data ? headCount + " · " + (tallyAll.running + tallyAll.starting) + " 个在跑" : "正在读取…")}
                 ${!onToolPage && tallyAll.attention ? html`<span style=${{ color: token.colorError }}>
                   ${" · " + tallyAll.attention + " 个需要关注"}</span>` : null}
@@ -3849,62 +4392,20 @@
                   ${" · " + busyShown + " 个正在操作"}</span>` : null}
               </div>
             </div>
-            ${"" /* 设置那两页（SDK 管理、日志）上不摆启停与「添加应用」，
-                   理由见上面 onToolPage 那段。 */}
+            ${"" /* 设置那三页（SDK 管理、日志管理、偏好设置）上不摆启停与「添加应用」，
+                   理由见上面 onToolPage 那段。
+
+                   这一排原先还有一颗「⋯」：现在看的是哪份数据 / 复制成 YAML /
+                   导出清单… / 打开清单… / 清理残留记录。那一组说的是同一件事
+                   ——手上这份清单在哪、怎么把它带走、怎么换一份——而这件事跟
+                   「对这一页的服务做什么」没有关系，却占着主区每时每刻最显眼的那一排，
+                   点开还看得见一组跟屏幕上这一页无关的操作。整组挪进了偏好设置的
+                   「数据」一栏（见 SettingsPage），顶栏只剩下面这些按页生效的动作。
+
+                   代价是清楚的：打开只读清单之后，那一页上不再有一眼可见的「现在看的
+                   是哪一份」。所以只读时主区顶上那条告警里写着去哪儿切回来（见下面
+                   readOnly 那一段），而偏好设置的「数据」栏里那份是完整的。 */}
             ${onToolPage ? null : html`<div className="dc-head-acts">
-              <${A.Dropdown} trigger=${["click"]} placement="bottomRight" menu=${{ items: [
-                // 这一组说的是一件事：手上这份清单现在在哪、怎么把它带走、怎么换一份。
-                //
-                // 第一行「现在看的是哪份数据」原来挂在侧栏底部（一行弱化色的文字加行尾一个
-                // 文件夹按钮）。它和下面三项本来就是同一件事，分开摆着的时候，得先在侧栏
-                // 找到那行、再回顶栏点「⋯」才能把「换一份清单」做完。点这一行＝原来那个
-                // 文件夹按钮（打开数据目录 / 在文件管理器里显示）。
-                //
-                // 代价说清楚：SDK 管理、日志那两页上没有「⋯」，那两页就看不到自己在看哪份
-                // 数据了。那两页本来也不跟清单里写了什么打交道（一个说本机装了哪些 SDK，
-                // 一个按服务名读日志目录），认了。
-                { key: "src", icon: e(readOnly ? IconDoc : IconLayers),
-                  label: html`<span className="dc-src" title=${cfgPath ? cfgName + " · " + cfgPath : cfgName}>
-                    <span className="dc-src-name">${cfgName}</span>
-                    ${"" /* 来源只在不寻常时才标：平时就是「本机数据」，和名字重复。 */}
-                    ${data && data.configSource && data.configSource !== "本机数据" ? html`<span className="dc-src-tag"
-                      style=${{ background: token.colorFillTertiary }}>${data.configSource}</span>` : null}
-                    ${cfgShort ? html`<span className="dc-src-dir dc-mono" title=${cfgDir}>${cfgShort}</span>` : null}
-                  </span>` },
-                { key: "yaml", label: "复制成 YAML", icon: e(IconDoc) },
-                { key: "export", label: "导出清单…", icon: e(IconLayers) },
-                { key: "open", label: "打开清单…", icon: e(IconFolder) },
-                // 选错了要能退回来：打开的如果是 YAML，整份就只读、编辑入口全收起，
-                // 而没有这条的话，双击启动的人只能重启一次 Pier。
-                readOnly ? { key: "local", label: "回到本机数据", icon: e(IconLayers) } : null,
-                { type: "divider" },
-                { key: "prune", label: "清理残留记录", icon: e(IconBroom) }
-              ].filter(Boolean), onClick: async function (mi) {
-                try {
-                  if (mi.key === "src") {
-                    call("revealConfig").catch(function () {});
-                  } else if (mi.key === "yaml") {
-                    var y = await call("configYAML");
-                    await call("copyText", y.text);
-                    flash("ok", "已复制清单 YAML");
-                  } else if (mi.key === "export") {
-                    var ex1 = await call("exportConfig");
-                    flash("ok", ex1.canceled ? "已取消" : (ex1.msg || "已导出"));
-                  } else if (mi.key === "open") {
-                    var op = await call("openConfig");
-                    flash("ok", op.canceled ? "已取消" : (op.msg || "已打开"));
-                  } else if (mi.key === "local") {
-                    var lc = await call("useLocalConfig");
-                    flash("ok", lc.msg || "已切回本机数据");
-                  } else {
-                    var r = await call("prune");
-                    flash("ok", r.msg || "已清理");
-                  }
-                } catch (ex) { flash("err", ex.message); }
-                refresh();
-              } }}>
-                <${A.Button} icon=${e(IconMore)} title="更多操作" aria-label="更多操作"/>
-              <//>
               ${"" /* 这对按钮跟着当前这一页走：在「全部服务」页上是全部服务，
                      在某个分组页上就只作用于这一组。以前它们写死调 startAll / stopAll，
                      于是在分组页点「全部停止」会把屏幕上根本没显示、也不属于这个分组的
@@ -3952,25 +4453,44 @@
           ${banner ? html`<${A.Alert} className="dc-hidden-bar" type="info" showIcon closable
             message=${banner} onClose=${function () { setBanner(""); }}/>` : null}
 
+          ${"" /* 上一次替换的结果。点掉才清：读一次就删等于「更新失败了，
+                 而界面上一句都不说」——助手那边没有第二个能说话的地方。
+                 成功那条也给一句，否则换了文件之后什么都没发生，用户得自己去
+                 偏好设置里看版本号才知道刚才那一下成没成。 */}
+          ${res ? html`<${A.Alert} className="dc-hidden-bar" showIcon closable
+            type=${res.ok ? "success" : "error"}
+            message=${res.ok ? "已经更新到 " + res.version : "上次更新没有成功"}
+            description=${res.ok ? (hasVal(res.message) ? res.message : "")
+              : (res.message || "") + (res.rolledBack ? "（原来的文件已经放回去了）" : "")}
+            onClose=${function () {
+              call("updateClearResult").catch(function () {});
+              upRefresh();
+            }}/>` : null}
+
           ${onSDKPage ? html`<${SDKPage} message=${msg.message} modal=${msg.modal}/>`
             : onLogPage ? html`<${LogPage} message=${msg.message} modal=${msg.modal}
                 onOpenLog=${function (n) { setLog({ open: true, name: n }); }}/>`
+            : onSettingsPage ? html`<${SettingsPage} up=${up} th=${th} data=${data}
+                message=${msg.message} reload=${upRefresh} refresh=${refresh}/>`
             : html`<${React.Fragment}>
           ${"" /* 分析面板摆在告警之后、服务列表之前：告警说的是「下面这些可能不是真的」，
                  排在它前面就成了「先看数字再看免责声明」。 */}
           ${data && services.length && !noMatch ? html`<${Overview} data=${data} services=${shownServices}
             scope=${selected} usage=${shownUsage}/>` : null}
 
-          ${"" /* 只读的来源有两种：命令行 --config，或者顶栏「⋯ → 打开清单…」。
+          ${"" /* 只读的来源有两种：命令行 --config，或者偏好设置里的「打开清单…」。
                  退回去的办法不一样，所以这句话跟着来源走——只写「去掉 --config」
-                 对第二种人是一句没有门的话，他们压根没给过这个参数。 */}
+                 对第二种人是一句没有门的话，他们压根没给过这个参数。
+
+                 「现在看的是哪份数据」已经从顶栏挪进偏好设置，这一条就是主区里
+                 唯一还在说这件事的地方：只读本来就不寻常，该说的时候把路一起说清楚。 */}
           ${readOnly ? html`<${A.Alert} type="info" showIcon className="dc-hidden-bar"
             message=${(data.configSource === "命令行指定" ? "正在查看命令行指定的清单 " : "正在查看只读清单 ")
               + cfgPath}
             description=${"这份 YAML 文件 Pier 只读不写：可以启停，但不能在界面里增删改。"
               + (data.configSource === "命令行指定"
                 ? "去掉 --config 启动就会回到本机数据。"
-                : "顶栏「⋯」里的「回到本机数据」可以切回去。")}/>` : null}
+                : "偏好设置 · 数据 里的「回到本机数据」可以切回去。")}/>` : null}
 
           ${!data ? html`<${A.Skeleton} active paragraph=${{ rows: 6 }}/>` : null}
 

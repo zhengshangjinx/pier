@@ -97,21 +97,41 @@ Pier 把它们拿出来，变成一份清单加一个常驻的轻量入口：
 - 清理时会跳过正在运行的服务：日志句柄握在那个独立进程手里，删掉只是 unlink，
   空间要等它退出才真的空出来。
 
+### 更新
+
+- 启动后自己查一次 GitHub Releases（之后每 6 小时一次），有新版本就在侧栏那一行亮一颗点
+  ——自动更新最怕的是「查过了，而没人知道」。
+- 更新是**下载并重启安装**：界面里下完、校验过 SHA-256，点「重启并安装」，一个助手等
+  Pier 退出之后把文件换掉，再把它拉回来。下载失败、校验不通过、磁盘不够、安装目录写不动，
+  一律拒绝安装并说明原因，绝不换一半；换的过程写在 `logs/update/<日期>.log`，
+  失败原因下次启动时会摆回界面上。
+- 认不出安装位就不动手：自己从源码编的、`go install` 装的那两份，说清楚该用什么方式升级，
+  不给「立即更新」这条路——猜错一次就是把用户的安装目录搞坏。
+- 不想升这一版可以「跳过」，同一个版本不再提，直到有更新的版本。
+- 命令行同一件事：`pier update --check` 只查不装，退出码 10 就是有新版本，脚本直接看它；
+  `pier update` 下载、校验并换上。界面开着时命令行拒绝动手——先在界面里退出，
+  或者用界面里的「重启并安装」。
+
 ### 界面（macOS）
 
-- 侧栏只有两节：**服务**（全部服务 / 各分组）与**设置**（SDK 管理、日志）。
+- 侧栏两节：**服务**（全部服务 / 各分组）与**设置**（SDK 管理、日志管理）；底下单出一行
+  **偏好设置**（更新、外观与清单），右边写着当前版本号，有新版时换成主色的圆点加最新版本号。
 - 服务可拖动排序，可改名（日志目录跟着搬），可「复制一份」接着改。
 - 搜索与「全部 / 在跑 / 异常」筛选，批量启停跟着当前这一页走。
 - 日志抽屉、端口占用（谁占着、直接结束）、健康探针未通过时的收场方式。
-- 清单可以「复制成 YAML」贴进 `pier.yaml`，也可以导出成文件、或者打开另一份清单来用
-  （打开的那份是只读的，随时能切回本机数据）。
+- 偏好设置分三栏：通用（检查 / 下载 / 跳过、自动检查开关）、外观（亮色 / 暗色 / 跟随系统）、
+  数据。清单那一栏写着手上是哪份数据，可以「复制成 YAML」贴进 `pier.yaml`、导出成文件、
+  或者打开另一份清单来用（打开的那份是只读的，随时能切回本机数据）；进程记录与实际对不上时，
+  也在这一栏手动收尾。
 - 几套 SDK 的「将使用 X，依据 Y」与实际启动走的是同一个解析器，不是另写一份简化版。
 
-日志抽屉、SDK 管理与深色主题（其余几张见 [docs/images](docs/images/README.md)）：
+日志抽屉、SDK 管理、偏好设置与深色主题（其余几张见 [docs/images](docs/images/README.md)）：
 
 ![日志抽屉](docs/images/logs.png)
 
 ![SDK 管理](docs/images/sdk.png)
+
+![偏好设置](docs/images/settings.png)
 
 ![深色主题](docs/images/dark.png)
 
@@ -166,6 +186,10 @@ go install github.com/zhengshangjinx/pier@latest
 Windows 装到 `%LOCALAPPDATA%\Programs\Pier`，Linux 装到 `~/.local`，都不需要管理员；
 macOS 就是那个 `.app` 本身——界面 `pier-gui` 与命令行 `pier` 都在它里面，
 `.dmg` 里的「应用程序」替身拖过去就装完了。
+
+装完之后就不用再回来找这份包了：Pier 会自己查更新（见[更新](#更新)）。唯一的例外是
+**0.2.0 及更早的版本**——更新器是后来才加的，那几版里没有它，从那里升上来要手动装一次；
+这一次之后就不会再有断层。
 
 macOS 上 `pier` 在 `.app` 里面，做一次软链就有命令了：
 
@@ -226,6 +250,9 @@ ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier   # 要 /us
 | `pier logs --clean [服务] [--all]` | 清理超过 14 天的日志；`--all` 清空 |
 | `pier ui` | 打开终端里的交互式面板 |
 | `pier api` | 起一个只服务本机的 HTTP 接口（`--show-token` / `--rotate` / `--port N`） |
+| `pier version` | 显示版本号 |
+| `pier update --check` | 查一下有没有新版本，只查不装：退出码 0 已是最新，10 有新版本，1 没查成 |
+| `pier update` | 下载、校验并换上最新版本 |
 
 所有子命令都接受 `--config <清单>`，用来临时指定一份 YAML 清单（只读）。
 
@@ -281,11 +308,17 @@ Java 服务的编译步骤固定带 `-DskipDocker=true -Ddocker.skip=true -Ddock
 ```
 ~/.pier/
 ├── services.json   服务与分组（界面上编辑的就是这份）
-├── settings.json   界面偏好、手动添加的 SDK 目录、各语言的全局默认
+├── settings.json   界面偏好（主题、自动检查更新、跳过的版本）、手动添加的 SDK 目录、
+│                   各语言的全局默认
 ├── state.json      进程状态（PID / PGID），用来在重开 Pier 后认领服务
+├── update.json     上次查到哪一版（发布说明、产物名、ETag）
 ├── restart.lock    自动重启巡检的独占锁，同时开两个宿主也只有一边会去拉
+├── gui.lock        界面开着时由它占着，命令行据此拒绝替换文件
 ├── logs/<服务名>/<日期>.log
-└── cache/bin/      Node 服务改进程名用的硬链
+├── logs/update/<日期>.log
+└── cache/
+    ├── bin/        Node 服务改进程名用的硬链
+    └── update/     下载的产物、解出来的新版本，以及更新助手留下的结果
 ```
 
 数据文件不存在就建一个空的。设 `PIER_HOME` 可以把整个目录挪到别处（测试一律用它，不碰真实数据）。
@@ -296,6 +329,7 @@ Java 服务的编译步骤固定带 `-DskipDocker=true -Ddocker.skip=true -Ddock
 go vet ./... && go test ./... -count=1     # 校验
 ./build-app.sh                             # 打包 build/Pier.app
 tools/shoot/shoot.py /tmp/a.png 1382 880   # 把界面渲染成截图（演示数据）
+tools/smoke-update.sh cli                  # 在临时目录里造一份假安装，走一遍 pier update
 ```
 
 仓库里有一份 [`AGENTS.md`](AGENTS.md)，记着这个项目的各种取舍与约定（界面规则、日志规则、

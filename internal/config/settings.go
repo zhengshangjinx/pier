@@ -31,6 +31,15 @@ type Settings struct {
 	APIToken string `json:"apiToken,omitempty"`
 	// APIPort 是本地 HTTP 接口监听的端口，0 或越界时用默认值。
 	APIPort int `json:"apiPort,omitempty"`
+
+	// UpdateCheck 是「自动检查更新」开关，默认开。
+	//
+	// 刻意不加 omitempty：关掉之后要写进文件的是那个 false，加了就会被写没，
+	// 下次读回来又变成默认的 true——用户关了一次，看着像没关住。
+	UpdateCheck bool `json:"updateCheck"`
+	// UpdateSkipped 是用户点名跳过的版本号（如 0.3.0），空表示没跳过谁。
+	// 跳过是偏好，放这儿；「上次查到什么」是状态，放 update.json，两边不重复记。
+	UpdateSkipped string `json:"updateSkipped,omitempty"`
 }
 
 // SettingsPath 返回默认数据目录下的偏好文件路径。
@@ -42,9 +51,19 @@ func SettingsPath() (string, error) {
 	return filepath.Join(d.Data, SettingsName), nil
 }
 
+// defaultSettings 是偏好文件的默认值。
+//
+// 新加的开关默认是开是关只写在这一个地方，往后加字段也往这儿加。
+// 读文件那条路不用另写迁移：LoadSettings 先铺这份默认值再 Unmarshal，
+// JSON 里没有的键不会覆盖已有的值——老用户的 settings.json 里没有 updateCheck，
+// 读出来就是这里的 true。
+func defaultSettings() Settings {
+	return Settings{Theme: "system", UpdateCheck: true}
+}
+
 // LoadSettings 读取偏好；文件不存在时返回默认值，不算错误。
 func LoadSettings(path string) (Settings, error) {
-	s := Settings{Theme: "system"}
+	s := defaultSettings()
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -52,7 +71,7 @@ func LoadSettings(path string) (Settings, error) {
 		return s, fmt.Errorf("读取偏好失败：%w", err)
 	}
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return Settings{Theme: "system"}, fmt.Errorf("偏好文件 %s 已损坏：%w", path, err)
+		return defaultSettings(), fmt.Errorf("偏好文件 %s 已损坏：%w", path, err)
 	}
 	if !validTheme(s.Theme) {
 		s.Theme = "system"
@@ -78,7 +97,7 @@ func DefaultSettings() Settings {
 			return s
 		}
 	}
-	return Settings{Theme: "system"}
+	return defaultSettings()
 }
 
 // SaveSettings 整份写回偏好。
@@ -90,7 +109,7 @@ func SaveSettings(path string, s Settings) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, append(raw, '\n'))
+	return WriteAtomic(path, append(raw, '\n'))
 }
 
 func validTheme(t string) bool {

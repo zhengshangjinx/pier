@@ -27,6 +27,10 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$(dirname "$0")"
 MODULE_DIR="$(pwd)"
 VERSION="${1:-0.1.0}"
+# 与 build-app.sh 里同一对变量：版本号，加一个「这是打包产物」的记号
+# （自更新靠它认自己该不该被替换）。变量名必须写全，少一段 -X 会静默不生效。
+VERSION_LDFLAG="-X github.com/zhengshangjinx/pier/internal/version.Version=$VERSION"
+VERSION_LDFLAG="$VERSION_LDFLAG -X github.com/zhengshangjinx/pier/internal/version.released=1"
 DIST="$MODULE_DIR/dist"
 APP="$MODULE_DIR/build/Pier.app"
 
@@ -82,7 +86,7 @@ else
 	# 根上并排摆两个「应用程序」，光看名字分不出该点哪个——这正是要收掉的东西。
 	mkdir -p "$WINDIR/bin"
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-		go build -trimpath -ldflags "-s -w" -o "$WINDIR/bin/pier.exe" .
+		go build -trimpath -ldflags "-s -w $VERSION_LDFLAG" -o "$WINDIR/bin/pier.exe" .
 	# 界面这一份要 -H=windowsgui：不给的话双击之后会先弹一个黑色控制台窗口，
 	# 关掉它界面也跟着没了。
 	#
@@ -96,7 +100,7 @@ else
 	x86_64-w64-mingw32-windres -O coff -o "$SYSO" "$WORK/pier.rc"
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
 		CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
-		go build -trimpath -ldflags "-s -w -H=windowsgui" -o "$WINDIR/pier-gui.exe" ./gui
+		go build -trimpath -ldflags "-s -w -H=windowsgui $VERSION_LDFLAG" -o "$WINDIR/pier-gui.exe" ./gui
 	rm -f "$SYSO"
 	cp "$MODULE_DIR/tools/pkg/windows/README.txt" "$WINDIR/README.txt"
 	cp "$MODULE_DIR/tools/pkg/windows/install.ps1" "$WINDIR/install.ps1"
@@ -121,7 +125,10 @@ else
 	docker build -q --platform linux/arm64 $build_args -t pier-linux-build "$MODULE_DIR/tools/pkg/linux" >/dev/null
 	mkdir -p "$WORK/linux-out"
 	# 源码只读挂进去；模块缓存与构建缓存用两个卷，第二次打包不用重新下载。
+	# 版本号经环境变量进容器：容器里看不到宿主机的 shell 变量，不传的话编出来的
+	# 两份 Linux 产物没有版本号，`pier version` 会显示 dev。
 	docker run --rm \
+		-e PIER_VERSION="$VERSION" \
 		-v "$MODULE_DIR":/src:ro \
 		-v pier-linux-gomod:/root/go/pkg/mod \
 		-v pier-linux-gocache:/root/.cache/go-build \

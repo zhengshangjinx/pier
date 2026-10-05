@@ -69,12 +69,14 @@ body {
 
 /* 分组前那颗状态点要占满图标位的宽度，和「全部服务」的图标对齐。 */
 .dc-nav-dot { display: inline-flex; width: 14px; justify-content: center; }
-.dc-nav .ant-menu-item .dc-nav-dot + span { margin-inline-start: 10px; }
+.dc-side .ant-menu-item .dc-nav-dot + span { margin-inline-start: 10px; }
 
 /* antd 的 Menu 默认铺一层 colorBgContainer 的白底。侧栏这一版要的是透明：
    白底会在灰底和右侧白面板之间横插一块白，看着像侧栏里又嵌了张卡片，
-   「整页只有一块白」的层次就断了。 */
-.dc-nav .ant-menu { background: transparent; }
+   「整页只有一块白」的层次就断了。
+   页脚那一个 Menu 也在侧栏里，同一条规则一并管上——它自己再写一份的话，
+   两处迟早只剩一处是对的。 */
+.dc-side .ant-menu { background: transparent; }
 
 /* 菜单项里的「名字 + 数量」两端对齐。名字过长时省略，
    不能让数字被挤出去。 */
@@ -113,12 +115,27 @@ body {
 .dc-nav-row.dc-nav-drop-before { box-shadow: inset 0 2px 0 var(--dc-primary); }
 .dc-nav-row.dc-nav-drop-after { box-shadow: inset 0 -2px 0 var(--dc-primary); }
 
-/* 页脚只剩主题那一行：它不跟着数据走，是纯界面偏好，收尾的地方留给它正合适。 */
+/* 页脚只剩「偏好设置」这一行：它不跟着数据走，是应用自己的事，
+   收尾的地方留给它正合适。上面那条发丝线由 app.js 用 token 给。 */
 .dc-side-foot { flex: none; padding-top: 12px; }
 
-/* 「⋯」里那行「现在看的是哪份数据」（本机数据 / 命令行指定的那份 YAML）。
+/* 页脚右边的版本号。平时只是弱化色的字，不加底色、不做胶囊——
+   灰侧栏里最亮的那块要是搁在这儿，比上面真要点的导航还抢眼。
+   有新版本时整格转主色并换成最新版本号（颜色由 app.js 给）：
+   自动更新最怕的就是「查过了，而没人知道」。 */
+.dc-set-ver {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dc-text3);
+}
+
+.dc-set-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+/* 偏好设置「数据」那一栏里的「现在看的是哪份数据」（本机数据 / 只读的那份 YAML）。
    名字、来源标签、目录挤在一行里，目录是唯一可以让位的东西：放不下就省略，
-   完整路径在 title 上。撑破下拉菜单比少显示几个字难看，省略的是目录不是名字。 */
+   完整路径在 title 上。把卡片撑破比少显示几个字难看，省略的是目录不是名字。 */
 .dc-src {
   display: inline-flex;
   align-items: center;
@@ -142,12 +159,6 @@ body {
    共用上面那一档胶囊样式（高度、圆角、内边距都在那儿），这里只补颜色。 */
 .dc-src-tag { flex: none; color: var(--dc-text3); }
 
-.dc-side-foot .ant-segmented-item-label {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
 
 /* ── 主区 ───────────────────────────────────────────────────────────────── */
 
@@ -164,8 +175,8 @@ body {
 }
 
 /* 页头是两行：上面一行「标题 + 动作」，下面一行是搜索与快捷筛选。
-   筛选那一行不跟标题挤在同一排里：窗口窄下来时右边那排按钮（⋯ / 启停 / 添加应用）
-   本来就占满了，再塞进一个输入框和三个选项，先被顶出窗口的会是「添加应用」。
+   筛选那一行不跟标题挤在同一排里：窗口窄下来时右边那排按钮（启停 / 从端口添加 /
+   添加应用）本来就占满了，再塞进一个输入框和三个选项，先被顶出窗口的会是「添加应用」。
    也不放进下面会滚动的 .dc-body：筛完往下翻，得还能看见自己筛了什么。 */
 .dc-head {
   flex: none;
@@ -606,6 +617,63 @@ body {
 }
 
 .dc-card-alert { margin-bottom: 16px; }
+
+/* ── 偏好设置页 ─────────────────────────────────────────────────────────── */
+
+/* 这一页与前两页（SDK 管理、日志）不同：它有分类，所以是左栏 + 右栏。
+   左栏钉住不跟着滚——.dc-body 是滚动区，往下翻两屏之后，左栏跟着滚没了，
+   就不知道自己停在「通用」还是「外观」里了。 */
+.dc-set { display: flex; align-items: flex-start; gap: 28px; }
+
+.dc-set-tabs {
+  flex: none;
+  width: 132px;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dc-set-tab {
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--dc-text2);
+}
+
+.dc-set-tab:hover { background: var(--dc-hover); }
+
+/* 选中那一栏和侧栏里的导航项同一档底色：这一页里的「现在在哪」和侧栏里的
+   是同一件事，两处给不同的样子，读的人要多想一次。 */
+.dc-set-tab.is-on { background: var(--dc-fill); color: var(--dc-text); font-weight: 600; }
+
+/* 右栏限宽。设置卡片拉满整块面板（宽屏下能到一千多）就成了一行一句、
+   眼睛要从左扫到右才找到下一行的开头；720 是这一页最长那几句话排得下的宽度。 */
+.dc-set-body { flex: 1; min-width: 0; max-width: 720px; }
+
+/* 卡片在表单里底下压着的是表单项自己的边距，这一页底下压的是按钮行，
+   不补回来的话最后一行会贴着卡片的底边。 */
+.dc-set .dc-card { padding-bottom: 16px; }
+
+/* 一行「左边说明、右边值」。左边那一列固定宽度，几行的值才对得齐。
+   值本身可能带一个跟随物（比如版本号后面的「有新版本」标签），
+   让它挨着值排而不是被推到行尾：推到行尾的话，那枚标签和它说的那个版本号
+   隔着一整行的空白，读起来像是另一行的事。 */
+.dc-set-row { display: flex; align-items: center; gap: 12px; padding: 5px 0; }
+.dc-set-key { flex: none; width: 88px; }
+.dc-set-val { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.dc-set-flex { flex: 1; }
+.dc-set-acts { margin-top: 16px; }
+.dc-set-hint { margin-top: 12px; line-height: 1.6; }
+
+/* 有新版本时那一块。用一层浅底把它从卡片里托出来：上面那三行版本信息说的是
+   「现在」，这一块说的是「可以变成什么」，中间不断一下会读成同一件事的续行。 */
+.dc-set-note { margin-top: 16px; border-radius: 10px; padding: 12px 14px; }
+.dc-set-note-head { font-weight: 600; margin-bottom: 8px; }
+
+/* 发布说明按原样换行：后端给的就是一段带换行的文字，挤成一行就读不出条目了。 */
+.dc-set-notes { white-space: pre-wrap; line-height: 1.6; margin: 4px 0 14px; }
 
 /* 端口挑选里的两张卡在 Space 里排，行距由 Space 给：卡片自己再留一份的话，
    两张卡之间就是 24px，比弹窗里别处的行距宽出一倍。下内边距也要补回来——

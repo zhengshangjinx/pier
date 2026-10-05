@@ -30,6 +30,20 @@ PIER_ARCH="${PIER_ARCH:-universal}"
 # 版本号写进 Info.plist。package.sh 会用 PIER_VERSION 覆盖它；
 # 直接跑这个脚本时用下面这个默认值。
 VERSION="${PIER_VERSION:-0.1.0}"
+# 同一个版本号还要编进二进制里：自更新靠它判断「现在这一份是第几版」。
+# 第二个 -X 是个记号，说明这份是打包产物（本地 go build 出来的没记号）——
+# 光看版本号分不出来，从 go 1.24 起在打了 tag 的提交上直接 go build 也带着版本号。
+# 两个变量名都必须写全（模块路径 + 包 + 变量），少一段 -X 会静默不生效，
+# 症状是界面上版本号一直显示 dev，很难看出来是注入没成。
+#
+# 前提是 PIER_VERSION 真的给过（也就是由 package.sh 在打包）：本机调试直接跑这个脚本时
+# 一个都不注入，界面里那份就老老实实说自己是 dev。上面那个 0.1.0 只是给 Info.plist 的
+# 兜底值，编进二进制就成冒充了——「本机编的」与「发布产物」的区别正是自更新要认的东西。
+VERSION_LDFLAG=""
+if [ -n "${PIER_VERSION:-}" ]; then
+	VERSION_LDFLAG="-X github.com/zhengshangjinx/pier/internal/version.Version=$VERSION"
+	VERSION_LDFLAG="$VERSION_LDFLAG -X github.com/zhengshangjinx/pier/internal/version.released=1"
+fi
 
 echo "==> 清理 build 目录"
 # build/ 只放打包产物，整个清掉重建：只删当前这个 .app 的话，改过名的旧产物
@@ -59,9 +73,9 @@ universal)
 		# -trimpath 去掉二进制里的本机路径（/Users/<名字>/...）：这份 .app 是要发出去的，
 		# 里面不该带着打包这台机器的目录结构。
 		CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
-			go build -trimpath -o "$MACHO/$BIN_NAME.$arch" ./gui
+			go build -trimpath -ldflags "$VERSION_LDFLAG" -o "$MACHO/$BIN_NAME.$arch" ./gui
 		CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" \
-			go build -trimpath -ldflags "-s -w" -o "$MACHO/$CLI_NAME.$arch" .
+			go build -trimpath -ldflags "-s -w $VERSION_LDFLAG" -o "$MACHO/$CLI_NAME.$arch" .
 	done
 	lipo -create -output "$APP/Contents/MacOS/$BIN_NAME" \
 		"$MACHO/$BIN_NAME.arm64" "$MACHO/$BIN_NAME.amd64"
@@ -70,9 +84,9 @@ universal)
 	;;
 arm64 | amd64)
 	CGO_ENABLED=1 GOOS=darwin GOARCH="$PIER_ARCH" \
-		go build -trimpath -o "$APP/Contents/MacOS/$BIN_NAME" ./gui
+		go build -trimpath -ldflags "$VERSION_LDFLAG" -o "$APP/Contents/MacOS/$BIN_NAME" ./gui
 	CGO_ENABLED=0 GOOS=darwin GOARCH="$PIER_ARCH" \
-		go build -trimpath -ldflags "-s -w" -o "$APP/Contents/MacOS/$CLI_NAME" .
+		go build -trimpath -ldflags "-s -w $VERSION_LDFLAG" -o "$APP/Contents/MacOS/$CLI_NAME" .
 	;;
 *)
 	echo "PIER_ARCH 只能是 universal / arm64 / amd64，收到：$PIER_ARCH" >&2

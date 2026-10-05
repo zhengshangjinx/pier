@@ -19,6 +19,7 @@ go vet ./... && go test ./... -count=1     # 校验
 PIER_APT_MIRROR=mirror.nju.edu.cn PIER_GO_DL=https://mirror.nju.edu.cn/golang \
   PIER_GOPROXY=https://goproxy.cn,direct ./package.sh 0.1.0
 tools/shoot/shoot.py /tmp/a.png 1382 880 [弹窗] [参数] [light|dark]   # 演示数据截图（尺寸用初始窗口那个）
+tools/smoke-update.sh [cli|bundle]         # 临时目录里造一份假安装，把 pier update 走一遍
 ```
 
 ## 三个平台
@@ -126,6 +127,40 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
   `.ico` 出 16~256 一整组给 Windows，两边画的是同一份 `render()`——改几何要一起对。
   别指望 `go build -overlay`：它能在目录列举里看见新加的 `.syso`，但交给链接器的还是原路径。
 
+## 更新与版本
+
+- **版本号靠注入，不靠猜**：`internal/version.Version` 由打包脚本用 `-X` 钉进去，
+  注入点一共 8 处 `go build`（`build-app.sh` 那份占 4 处，含 universal 的两份中间产物），
+  Linux 的版本号还要经 `PIER_VERSION` 传进容器。**必须同时钉第二个变量
+  `internal/version.released=1`**：允许原地替换自己的只有「从 Releases 下载来的产物」这一类，
+  而从 go 1.24 起，在打了 tag 的提交上直接 `go build`，`debug.ReadBuildInfo().Main.Version`
+  里也有真版本号（工作区脏时还带 `+dirty`）——光看版本号分不出打包产物与自编的，
+  而且 `BuildInfo.Settings` 里**没有** `-ldflags` 这一项，反查不出来，记号只能由脚本钉。
+  `build-app.sh` 只在 `PIER_VERSION` 给过时才钉：本机调试直接跑它，编出来的就是 dev。
+- **`PIER_UPDATE_BASE_URL` 只给测试用**（`internal/update` 的 `baseURLEnv`）：它把 API 基址
+  顶到一个本地假 release 上，`tools/smoke-update.sh` 与手工验收走这条路——不发一版就试不了
+  整条更新链路。正常使用不要设它，设了就等于把「更新从哪儿来」交给那个地址。
+- **换文件的是助手，不是 Pier 自己**：隐藏动词 `_update-apply`（不进 `usageText`，
+  `gui/main.go` 里也赶在碰 webview 之前拦一道）。它由**当前这一份二进制**复制到
+  `cache/update/<版本>/helper/` 之后重新执行——动手的永远是那份已经在用户机器上跑通的旧代码。
+  它等 Pier 退出（等的是 `gui.lock` 被放开）、按平台换文件、把结果写进 `result.json`、
+  再按 `Plan.Relaunch` 决定要不要拉回来。**它只能是 Go，不能是运行时生成的
+  shell / PowerShell 脚本**：换文件、回滚、读回结果每一步都要判错，写在 Go 里能单测；
+  Windows 上运行时生成的 `.ps1` 没法保证「带 BOM 的 UTF-8」（见上文），中文会变成乱码。
+- 平台差异照旧只落在 `apply_<平台>.go`：`apply_darwin.go` / `apply_windows.go` /
+  `apply_linux.go` / `apply_other.go`，另有 `asset_<平台>.go` 认「该下哪份产物」。
+  共用文件里不出现 `runtime.GOOS`，也不出现 `/Applications`、`ditto`、`powershell` 这些字眼；
+  `apply_unix.go` 只放两个 unix 平台共有的一句（跑着也能 `rename` 覆盖自己）。
+- **有界面在跑时命令行拒绝替换**（`update.GUIRunning()` 看 `gui.lock`）：Windows 上换不了
+  正在运行的 exe；unix 上换得动，但会把一个跑着旧代码、指着一份新安装的界面留在那儿，
+  症状比拦住更难解释。
+- 界面上的轮询只有 `App` 里那一处（空闲 60 秒、忙时 1 秒），侧栏页脚与偏好设置页读的是
+  同一份 `update.StatusOut`。别在两处各起一个定时器：一前一后对不上，圆点会和页面里的
+  说法打架。`up.result` 要在界面里单独接一个变量（`res`）再读：`gui/app_test.go` 的字段
+  白名单只认顶层 json 标签，`up.result.version` 会被拿去和 `StatusOut` 对，对不上。
+- **发版说明里要提一句**：从 0.2.0（更新器之前那一版）升上来的人得手动装一次，
+  之后不再有这个断层。
+
 ## 约定
 
 - 界面在 `gui/app.js`（React + antd UMD + htm，无打包器）与 `gui/app.css`。
@@ -135,9 +170,14 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
 - 品牌标记有两处，几何必须一致：`gui/app.js` 的 `Mark` 与 `tools/mkicon`。
 - 数据全部在 `~/.pier/`（`internal/config/store.go`）：`services.json`（服务与分组，目录一律
   绝对路径）、`settings.json`（主题等界面偏好，启动时经 `w.Init` 注入为 `window.__PIER_SETTINGS__`；
-  另有 `sdks`「SDK 管理」里手动添加的目录、`sdkDefaults` 各语言的全局默认）、
-  `state.json`（进程状态）、`logs/`、`cache/bin/`。`PIER_HOME` 可整体换位置（测试一律设它，
+  另有 `sdks`「SDK 管理」里手动添加的目录、`sdkDefaults` 各语言的全局默认、`updateCheck`
+  自动检查开关与 `updateSkipped` 跳过的版本）、`state.json`（进程状态）、
+  `update.json`（上次查到哪一版，见「更新与版本」）、`gui.lock`（界面开着时占着）、
+  `logs/`、`cache/bin/`、`cache/update/`。`PIER_HOME` 可整体换位置（测试一律设它，
   绝不碰真实数据）。环境变量与启动命令在表单「高级设置」里可编辑。
+  偏好的默认值只在 `config.defaultSettings()` 写一份（`gui/app.go` 的 `settingsScript`
+  直接用 `config.DefaultSettings()`），老用户的 settings.json 里没有新键时**靠
+  `LoadSettings` 的「先铺默认值再 Unmarshal」拿到默认值**，不另写迁移。
 - 数据文件不存在就建一个空的，不做任何旧版兼容（开发中的产品，不考虑兼容性）。
   命令行 `--config x.yaml` 可以只读地直接用一份 YAML，界面收起编辑入口；
   `EnsureStore(store, yamls)` 能把 YAML 导入成数据文件，目前只有测试用它铺数据。
@@ -173,20 +213,34 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
   可手动添加（`SDKAdd` 会真的校验一次再落盘，路径取校验后的规范值）、可设各类别的全局默认。
   表单里每个类别一个下拉加「浏览…」，下面是 `manage.Toolchain` 实时算出的「将使用 X，依据 Y」——
   走的是与真正启动同一个解析器，另写一份简化版迟早会对不上。
-- 侧栏只分两节：「服务」（全部服务、各个分组、新建分组，平铺）与「设置」（SDK 管理、日志）。分组前面那颗点
+- 侧栏只分两节：「服务」（全部服务、各个分组、新建分组，平铺）与「设置」（SDK 管理、日志管理）；
+  页脚那行「偏好设置」不算第三节，它是收尾的入口，理由见下。分组前面那颗点
   是灰/绿/红三态，形状本身就说明它是分组，不给它单开一个标题；新页面归进这两节之一，别再加出第三种
   层级——标题、孤零零的一项、没标题的一项摞在一起，读的人得先猜这里有几层。分组也别再试缩进了
   （试过、撤了）：232 的字宽里让出 24px 之后名字列只剩 100px，悬停时「…」一出来（它要在名字右边占
   28px，数量不许挪，见 `navLabel`）就当场地省略成「demo-adm…」；而且一缩进，分组看着像是「全部服务」
   展开出来的子节点，可它不是——它是另一条看服务的口径。
-- 「现在看的是哪份数据」是顶栏「⋯」里的**第一项**，不是侧栏底部的一行（挪过一次，别挪回去）。
-  它和下面那三项——复制成 YAML、导出清单…、打开清单…——说的是同一件事：手上这份清单在哪、
-  怎么把它带走、怎么换一份。分开摆的时候，得先在侧栏找到那行、再回顶栏点「⋯」才能把「换一份」做完。
-  点这一项就是「打开数据目录」（只读时是「在访达中显示清单」），按来源换图标与说法。
-  代价是清楚的：SDK 管理、日志那两页上没有「⋯」，那两页就看不到自己在看哪份数据了。认了——
-  那两页本来也不跟清单里写了什么打交道（一个说本机装了哪些 SDK，一个按服务名读日志目录）。
-  侧栏底部只剩主题那一行（`dc-side-foot`）：纯界面偏好，不跟着数据走，收尾的地方留给它正合适。
+- 「现在看的是哪份数据」连同它的其余四项（复制成 YAML、导出清单…、打开清单…、清理残留记录）
+  都收在**偏好设置的「数据」一栏**（`SettingsPage` 里 `tab === "data"` 那两块）里，主区顶栏上
+  没有「⋯」了（挪过两回：侧栏底部 → 顶栏「⋯」 → 这里。前两处都摆错了位置）。
+  这一组说的是同一件事：手上这份清单在哪、怎么把它带走、怎么换一份，而这件事跟
+  「对这一页的服务做什么」没有关系——摆在主区顶上，就是每时每刻都占着最显眼的那一排
+  一颗与启停无关的按钮，点开还看得见一组跟屏幕上这一页无关的操作。顶栏现在只剩启停、
+  从端口添加、添加应用，那三件的确是按页生效的。
+  清单那一行平时写「本机数据 ~/.pier」，只读时写文件名加来源标签（见 `cfgName` / `cfgShort`，
+  只读那份不在数据目录里，别照抄 `~/.pier`）；那一格的按钮跟着来源换说法：平时「打开数据目录」，
+  只读时「在访达中显示清单」。**只读时才出现**的「回到本机数据」不要挪走也不要去掉：打开的
+  若是 YAML，整份就只读、编辑入口全收起，没有这一颗，双击启动的人只能重启一次 Pier。
+  代价说清楚：只读之后主区里不再有一眼可见的「现在看的是哪一份」，所以 `App` 顶上那条只读告警
+  （`dc-hidden-bar`）里写着去哪儿切回来——两个来源的退路不一样，那句话跟着来源走，
+  只写「去掉 --config」对「打开清单…」进来的人是一句没有门的话。
+- 侧栏底部是「偏好设置」那一行（`dc-side-foot`）：更新、外观、数据都收在它打开的那一页里，
+  主题那条 Segmented 已经从页脚撤了。文案用「偏好设置」而不是「设置」——上面已经有一节叫
+  「设置」（SDK 管理 / 日志管理），同名并列会让人以为点进去是同一处。右侧那一格平时是当前版本号，
+  有新版时换成主色圆点加最新版本号：自动更新最怕的就是「查过了，而没人知道」。
   别再给页脚加回带底带框的卡片——灰侧栏里最亮的就是它，比上面真要点的导航还抢眼。
+  左栏那三栏（通用 / 外观 / 数据）是页面内的 `useState`，不落盘：它记的是「刚才在看哪一栏」，
+  不是什么偏好。
 - `gui/app.js` 的 `KIND_TOOLS`（服务类型 → 要用哪几套 SDK）是 `internal/config` 里各个
   `planXxx` 的第二份，靠 `gui/app_test.go` 的 `TestFormToolKindsMatchPlan` 守着，改一处要改两处。
   不含 pnpm：它跟着选中的 node 走，不是独立安装的一套。
@@ -202,7 +256,7 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
   的时刻会跟着当前钟点漂）。
   **轮转只能靠「启动时选文件名」**：日志 fd 由 setsid 出去的独立进程继承（见上一条），Pier 这边
   没有一个还能往里写的句柄，进程内的 rotator 无从谈起。
-- 「设置 · 日志」页（`gui/app.js` 的 `LogPage` + `panel.LogUsage`）列每个服务占了多少、几份、
+- 「设置 · 日志管理」页（`gui/app.js` 的 `LogPage` + `panel.LogUsage`）列每个服务占了多少、几份、
   日期区间，可「清理超期」「清空」（单服务 / 全部）、可开目录、可直接看最新那份。大小由后端
   `view.Bytes` 格式化好（`LogUsageOut.Size`）：命令行 `pier logs --size` 与界面必须是同一个字符串，
   各自格式化迟早一个「23.6 MB」一个「24 MB」。

@@ -25,10 +25,16 @@
     / adopt <端口>（从扫描结果里收一条：预演 + 填表，端口留空按演示数据里那个）
     / groupNew / groupRename / delete
     / select <分组> / logsPage / sdk
+    / settings <样子>（偏好设置页；样子留空就是「有新版本、还没下」，
+      见 app.js 里 __pierDemo.update 的分支：downloading / done / skipped /
+      failed / checkfail / nostall / latest / result / resultOk）
     / filter <关键词> / quick <all|running|attention>（页头那行搜索与筛选）
     / readonly <来源>（只读清单：页头说明位、收起的编辑入口与拖动）
       来源留空按「打开清单…」那种算，给「命令行指定」就拍命令行那种说法
 主题是 light / dark / system，留空表示跟随系统。
+
+环境变量 PIER_SHOT_JS 是一段在演示钩子跑完之后执行的 JS，用来够到演示钩子
+够不着的角落（例：点开偏好设置页里的「外观」那一栏）。
 
 环境变量 PIER_SHOT_NATIVE=1 会给页面加上 .dc-native，也就是真实窗口里的排版
 （页面铺到标题栏底下，顶上 28px 让给拖拽条）。默认不加：演示页没有那个窗口，
@@ -93,6 +99,10 @@ def open_modal(kind, arg, theme=""):
     if kind:
         calls.append("__pierDemo.open(%s)" % (
             '"%s", "%s"' % (kind, arg) if arg else '"%s"' % kind))
+    # 还有够不着的角落时（比如偏好设置页里「外观」那一栏，它是页面内的
+    # 一个 useState，演示钩子没必要为它再开一个口子），直接给一段 JS。
+    if os.environ.get("PIER_SHOT_JS"):
+        calls.append(os.environ["PIER_SHOT_JS"])
     if not calls:
         return ""
     # 主题先切，再开弹窗：弹窗的浮层挂在 body 上，必须先有正确的算法。

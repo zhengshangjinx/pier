@@ -16,7 +16,9 @@ import (
 	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/manage"
 	"github.com/zhengshangjinx/pier/internal/panel"
+	"github.com/zhengshangjinx/pier/internal/proc"
 	"github.com/zhengshangjinx/pier/internal/sysopen"
+	"github.com/zhengshangjinx/pier/internal/update"
 )
 
 // app 是界面层的宿主状态。除了窗口句柄，它只剩一个面板内核和它的编辑入口。
@@ -32,10 +34,24 @@ type app struct {
 	// 那两个方法，理由与 chrome 同。
 	badge  func(text string) error
 	bounce func() error
+	// guiClaim 是「有界面在跑」那把锁，由 main 在启动时领下，握到进程退出。
+	// 它是命令行那边判断「现在能不能替换文件」的唯一依据；第二个开着界面的
+	// 实例领不到它，于是那个实例没有「重启并安装」可用（见 internal/update 的 lock.go）。
+	guiClaim *proc.Claim
+	// up 是更新的那一整套状态：查到哪一版、下到哪儿了、上次换文件成没成。
+	// 界面侧只做往返，判断全在 internal/update 里。
+	up *update.Session
+	// quit 关掉这扇窗口，由 main 注入（和 chrome / badge 一样要碰窗口）。
+	// 只有「重启并安装」走到最后会用它：绑定先返回「更新已安排」，页面把这句话
+	// 显示出来之后再关。
+	quit func() error
 }
 
 func newApp(flagPath string) *app {
-	a := &app{panel: panel.New()}
+	a := &app{
+		panel: panel.New(),
+		up:    update.NewSession(update.New(update.Options{})),
+	}
 	a.mgr = a.panel.Manager()
 
 	path, src, err := config.Resolve(flagPath)
@@ -125,6 +141,17 @@ func (a *app) bindings() []binding {
 		{"pierSDKDefault", a.sdkDefault},
 		{"pierSDKRescan", a.sdkRescan},
 		{"pierToolchain", a.toolchain},
+		// 更新（偏好设置 · 通用）：查、下、取消、换，以及跳过某一版
+		{"pierUpdateStatus", a.updateStatus},
+		{"pierUpdateCheck", a.updateCheck},
+		{"pierUpdateDownload", a.updateDownload},
+		{"pierUpdateCancel", a.updateCancel},
+		{"pierUpdateApply", a.updateApply},
+		{"pierUpdateSkip", a.updateSkip},
+		{"pierUpdateNotes", a.updateNotes},
+		{"pierUpdateClearResult", a.updateClearResult},
+		// 关窗口。只有「重启并安装」用得上：它要等页面把那句话显示出来再关。
+		{"pierQuit", a.quitApp},
 	}
 }
 
@@ -279,13 +306,10 @@ func (a *app) revealConfig() string {
 // settingsScript 生成一段在页面脚本之前执行的 JS，把已保存的偏好放到 window 上。
 // 走注入而不是让页面加载后再来取：主题要在第一帧就定下来，晚一拍就是先闪一下亮色再变暗。
 func settingsScript() string {
-	s := config.Settings{Theme: "system"}
-	if p, err := config.SettingsPath(); err == nil {
-		if loaded, err := config.LoadSettings(p); err == nil {
-			s = loaded
-		}
-	}
-	raw, _ := json.Marshal(s)
+	// 默认值只在 config.defaultSettings 那一处写：这里再摆一份字面量的话，
+	// 新加的开关（比如 updateCheck）第一次渲染就会是关的，而设置页上看着像
+	// 用户自己关过——两处默认值迟早只剩一处是对的。
+	raw, _ := json.Marshal(config.DefaultSettings())
 	return "window.__PIER_SETTINGS__ = " + string(raw) + ";" + nativeScript()
 }
 
@@ -307,17 +331,41 @@ func boolText(v bool) string {
 	return "false"
 }
 
-// saveSettings 保存主题。
+// settingsPatch 是界面能改的那几项偏好。
+//
+// 用指针是为了分清「没送这一项」与「送了一个零值」：主题传空串是错的，
+// 而「关掉自动检查」送的正是 false，两者不能都当成没给。
+type settingsPatch struct {
+	Theme       *string `json:"theme"`
+	UpdateCheck *bool   `json:"updateCheck"`
+}
+
+// saveSettings 保存界面偏好，接一个 JSON 对象（{"theme":"dark"} / {"updateCheck":false}）。
+//
+// 接对象而不是固定的位置参数：再加设置项时不必再加绑定，也不必每加一项就把
+// 所有调用点改一遍。只改认得的键，其余键（界面比后端新时可能出现）忽略。
 //
 // 走 UpdateSettings 而不是整份写回：settings.json 里还有「SDK 管理」那一摊
-// （手动添加的 SDK、各语言的全局默认），换主题时整份覆盖会把它们抹掉——
-// 而换主题是这里最常见的动作。
-func (a *app) saveSettings(theme string) string {
+// （手动添加的 SDK、各语言的全局默认），改主题时整份覆盖会把它们抹掉——
+// 而改主题是这里最常见的动作。
+func (a *app) saveSettings(patch string) string {
+	var in settingsPatch
+	if err := json.Unmarshal([]byte(patch), &in); err != nil {
+		return errJSON("偏好内容无法解析：" + err.Error())
+	}
 	p, err := config.SettingsPath()
 	if err != nil {
 		return errJSON(err.Error())
 	}
-	if err := config.UpdateSettings(p, func(s *config.Settings) { s.Theme = theme }); err != nil {
+	err = config.UpdateSettings(p, func(s *config.Settings) {
+		if in.Theme != nil {
+			s.Theme = *in.Theme
+		}
+		if in.UpdateCheck != nil {
+			s.UpdateCheck = *in.UpdateCheck
+		}
+	})
+	if err != nil {
 		return errJSON(err.Error())
 	}
 	return okJSON("")
@@ -420,6 +468,76 @@ func (a *app) setChrome(hex string, dark bool) string {
 		return okJSON("")
 	}
 	if err := a.chrome(hex, dark); err != nil {
+		return errJSON(err.Error())
+	}
+	return okJSON("")
+}
+
+// ── 更新 ─────────────────────────────────────────────────────────────────
+//
+// 这里同样不做判断：什么算有新版本、下哪一份、什么时候不能换，全在
+// internal/update/session.go 里定。界面层多一句判断，另一份界面就要重新实现一遍。
+//
+// 查与下这两件事在那边是后台跑的，绑定只负责触发、立刻返回——绑定回调走的是
+// 界面线程，在这儿等一条 30 秒的请求，整个窗口会跟着卡住。
+
+func (a *app) updateStatus() string { return marshal(a.up.Status()) }
+
+func (a *app) updateCheck() string {
+	a.up.Check()
+	return okJSON("")
+}
+
+func (a *app) updateDownload() string {
+	a.up.Download()
+	return okJSON("")
+}
+
+func (a *app) updateCancel() string {
+	a.up.Cancel()
+	return okJSON("")
+}
+
+func (a *app) updateSkip(ver string) string {
+	if err := a.up.Skip(ver); err != nil {
+		return errJSON(err.Error())
+	}
+	return okJSON("")
+}
+
+// updateClearResult 收掉上次替换留下的那条消息（用户点掉之后才调）。
+//
+// 失败原因唯一的去处就是那一格：助手跑在 Pier 已经退出的空档里，没有窗口能报错。
+func (a *app) updateClearResult() string {
+	if err := a.up.DismissResult(); err != nil {
+		return errJSON(err.Error())
+	}
+	return okJSON("")
+}
+
+// updateNotes 打开这次更新那一版的发布页。
+//
+// 只接受「打开这次这一版」，不接受界面传一个地址进来：那等于把界面上的一个参数
+// 变成「用系统默认程序打开任意网址」。
+func (a *app) updateNotes() string { return open(a.up.NotesURL(), false) }
+
+// updateApply 把换文件交给助手。成功之后由页面过一会儿调 pierQuit——
+// 顺序不能反：先关窗口的话，用户看到的就是「点了一下，窗口没了」，
+// 而这次的安排、日志写在哪儿，一句都没来得及说。
+func (a *app) updateApply() string {
+	logPath, err := a.up.Apply()
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	return okJSON("更新已经安排好了，换文件的过程写在 " + logPath + " 里。")
+}
+
+// quitApp 关掉这扇窗口。
+func (a *app) quitApp() string {
+	if a.quit == nil {
+		return okJSON("")
+	}
+	if err := a.quit(); err != nil {
 		return errJSON(err.Error())
 	}
 	return okJSON("")

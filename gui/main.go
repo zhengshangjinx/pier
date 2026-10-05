@@ -14,14 +14,30 @@ import (
 	"os"
 
 	webview "github.com/webview/webview_go"
+
+	"github.com/zhengshangjinx/pier/internal/update"
 )
 
 func main() {
+	// 更新助手是同一份二进制、另一个动词：它要在 Pier 已经退出的空档里把文件换掉，
+	// 所以必须赶在碰 webview 之前分出去——这时候起窗口，换完文件的那个目录里
+	// 还开着一个用着旧代码的界面进程。
+	if len(os.Args) > 1 && os.Args[1] == update.ApplyVerb {
+		os.Exit(update.RunHelper(os.Args[2:]))
+	}
+
 	var cfgFlag string
 	flag.StringVar(&cfgFlag, "config", "", "只读打开一份 YAML 清单，不给则用 Pier 自己的数据")
 	flag.Parse()
 
 	a := newApp(cfgFlag)
+
+	// 领一下「有界面在跑」这把锁，握到进程退出（有意不放开）。命令行那边靠它
+	// 判断此刻能不能替换文件；两个界面同时开着时，后开的那个领不到，它就没有
+	// 「重启并安装」可用。领不到不是错误：界面本来就可以开两个。
+	if claim, ok, err := update.TryHoldGUI(); err == nil && ok {
+		a.guiClaim = claim
+	}
 
 	// webview 必须在主线程创建并运行，所以主 goroutine 全交给它；
 	// 业务逻辑都在绑定回调和后台 worker 里跑。
@@ -57,6 +73,17 @@ func main() {
 		w.Dispatch(func() { bounceIcon() })
 		return nil
 	}
+	a.quit = func() error {
+		w.Dispatch(func() { w.Terminate() })
+		return nil
+	}
+
+	// 自动检查更新：等一会儿再查第一次（不跟启动抢网络与磁盘），之后按时
+	// 到点再查。窗口一关就停——那个协程里的每一次调用都会先把状态写进
+	// 会话、再由页面来取，窗口没了就没人取了，留着也没有意义。
+	stopUpdate := make(chan struct{})
+	defer close(stopUpdate)
+	go a.up.AutoCheck(update.AutoFirst, update.AutoEvery, stopUpdate)
 
 	// 绑定失败会让界面上的按钮静默失效——那是最难排查的一类故障，
 	// 所以这里失败必须留下痕迹。绑定清单见 app.go 的 bindings()，

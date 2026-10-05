@@ -244,7 +244,7 @@ func processTree(root int) []int {
 // 服务起得来才是底线，改名是锦上添花。
 const namingByArgv0 = false
 
-// setDetached 让服务起在自己的会话里：
+// SetDetached 让进程起在自己的会话里：
 // 不跟着 Pier 的控制台走，关掉终端或 Pier 退出都不会把它带走。
 //
 // DETACHED_PROCESS 对应 unix 那边的 setsid——新进程不继承父进程的控制台，
@@ -252,7 +252,7 @@ const namingByArgv0 = false
 // CREATE_NEW_PROCESS_GROUP 让它自成一个进程组的根；Windows 上这个组号查不出来，
 // 但收树时得有个明确的起点。**故意不建 Job Object**：那东西默认会在句柄关闭时
 // 把整组带走，等于给这里加上一个 stop-on-quit，而 Pier 的约定是退出不带走在跑的服务。
-func setDetached(cmd *exec.Cmd) {
+func SetDetached(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
 	}

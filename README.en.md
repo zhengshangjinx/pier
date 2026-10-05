@@ -110,22 +110,47 @@ process group.
 - Cleaning skips services that are currently running: the log fd belongs to that independent
   process, so deleting the file would only unlink it and free the space on exit.
 
+### Updates
+
+- Pier checks GitHub Releases on startup (and every 6 hours after that); a new version puts a dot
+  on the sidebar row — an auto-updater's worst failure is having checked and told nobody.
+- Updating is **download, then restart into it**: the app downloads and verifies the SHA-256, and
+  "Restart and install" hands over to a helper that waits for Pier to exit, swaps the files and
+  brings it back. A failed download, a checksum mismatch, too little disk or a read-only install
+  location all refuse to install with the reason stated — never a half-applied update. The swap is
+  written to `logs/update/<date>.log`, and a failure shows up in the app on the next launch.
+- When the install location can't be recognised — you built Pier from source, or installed it with
+  `go install` — Pier says how that copy should be upgraded instead of guessing. Guessing wrong
+  once would wreck someone's install directory.
+- "Skip this version" stops the prompt for that release until a newer one appears.
+- The CLI does the same: `pier update --check` only reports (exit code 10 means an update is
+  available, so scripts can just read the code), `pier update` downloads and swaps. While the GUI
+  is running the CLI refuses to touch anything — quit the GUI first, or use "Restart and install"
+  there.
+
 ### GUI
 
-- Two sidebar sections only: **Services** (all / per group) and **Settings** (SDKs, logs).
+- Two sidebar sections: **Services** (all / per group) and **Settings** (SDKs, logs); below them a
+  single **Preferences** row (updates, appearance and the manifest) showing the current version,
+  replaced by a primary-coloured dot and the new version number when an update exists.
 - Reorder services by dragging, rename them (log directory moves along), duplicate one to edit.
 - Search and an "all / running / needs attention" filter; bulk start/stop follows the current page.
 - Log drawer, port occupancy (who holds it, kill it from there), and a defined way out when a
   health probe never passes.
-- Export the manifest as YAML to paste into `pier.yaml`, save it to a file, or open another
-  manifest read-only and switch back to local data at any time.
+- Preferences has three sections: general (check / download / skip, the automatic-check switch),
+  appearance (light / dark / follow-system), and data. The data section says which manifest is in
+  hand — paste it out as YAML for `pier.yaml`, save it to a file, or open another manifest
+  read-only and switch back to local data at any time — and cleans up process records that no
+  longer match reality.
 
-The log drawer, SDK management and the dark theme (the rest are in
+The log drawer, SDK management, preferences and the dark theme (the rest are in
 [docs/images](docs/images/README.md)):
 
 ![Log drawer](docs/images/logs.png)
 
 ![SDK management](docs/images/sdk.png)
+
+![Preferences](docs/images/settings.png)
 
 ![Dark theme](docs/images/dark.png)
 
@@ -181,6 +206,10 @@ All three end up looking the same: **one Pier in your launcher, one `pier` in yo
 none of them needs admin rights. Windows installs under `%LOCALAPPDATA%\Programs\Pier`, Linux under
 `~/.local`; on macOS the `.app` *is* the install — both the GUI `pier-gui` and the CLI `pier` live
 inside it, and the `/Applications` alias in the `.dmg` makes the drag the whole install.
+
+After that you never have to come back for another archive: Pier checks for updates itself
+(see [Updates](#updates)). The one exception is **0.2.0 and older** — those builds predate the
+updater, so getting off one takes a manual install; there is no gap after that.
 
 On macOS the CLI sits inside the `.app`, so one symlink gives you the command:
 
@@ -242,6 +271,9 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier logs --clean [service] [--all]` | Remove logs older than 14 days; `--all` clears everything |
 | `pier ui` | Open the interactive terminal panel |
 | `pier api` | Serve a loopback-only HTTP API (`--show-token` / `--rotate` / `--port N`) |
+| `pier version` | Print the version |
+| `pier update --check` | Check for a newer release without installing: exit code 0 up to date, 10 update available, 1 check failed |
+| `pier update` | Download, verify and swap in the latest release |
 
 Every subcommand accepts `--config <manifest>` to use a YAML manifest instead (read-only).
 
@@ -297,11 +329,17 @@ Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=
 ```
 ~/.pier/
 ├── services.json   services and groups (what the GUI edits)
-├── settings.json   UI preferences, manually added SDKs, global defaults
+├── settings.json   UI preferences (theme, automatic update checks, skipped versions),
+│                   manually added SDKs, global defaults
 ├── state.json      process state (PID / PGID) used to reclaim services
+├── update.json     what the last check found (release notes, asset name, ETag)
 ├── restart.lock    exclusive lock for the auto-restart sweep, so only one host sweeps
+├── gui.lock        held while the GUI runs; the CLI reads it before replacing files
 ├── logs/<service>/<date>.log
-└── cache/bin/      hard links used to name Node processes
+├── logs/update/<date>.log
+└── cache/
+    ├── bin/        hard links used to name Node processes
+    └── update/     downloaded assets, the extracted new version, and the helper's result
 ```
 
 Missing files are created empty. `PIER_HOME` relocates the whole directory (the tests always set
@@ -314,6 +352,7 @@ go vet ./... && go test ./... -count=1     # checks
 ./build-app.sh                             # build build/Pier.app
 ./package.sh                               # per-platform packages under dist/
 tools/shoot/shoot.py /tmp/a.png 1382 880   # render the UI to a PNG (demo data)
+tools/smoke-update.sh cli                  # fake install in a temp dir, then pier update on it
 ```
 
 [`AGENTS.md`](AGENTS.md) (Chinese) documents the project's conventions and the reasoning behind

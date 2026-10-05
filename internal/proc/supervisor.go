@@ -225,7 +225,7 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 	// 独立会话：服务不再受当前终端牵制，关掉终端或 Pier 退出都不会把它带走。
 	// 停止一律通过 pier down，走进程组信号。具体怎么脱离由平台层决定
 	// （unix 是 setsid，见 sys_unix.go）。
-	setDetached(cmd)
+	SetDetached(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 %s 失败：%w", svc.Name, err)
 	}
