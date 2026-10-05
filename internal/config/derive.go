@@ -111,6 +111,11 @@ func (s *Service) planNode() *Plan {
 		script = DefaultScript
 	}
 	p := &Plan{Kind: KindNode, Tools: []toolchain.Kind{toolchain.Node, toolchain.Pnpm}}
+	// 装依赖（pnpm install）这类前置步骤走 build：不读它的话，表单里那一栏
+	// 就是个按了不响的按钮——而它的占位符写的正是「如 pnpm install」。
+	if s.Build != "" {
+		p.Build = shellCmd(s.Build)
+	}
 	if s.Run != "" {
 		p.Run = shellCmd(s.Run)
 		return p
@@ -128,6 +133,10 @@ func (s *Service) planNode() *Plan {
 
 func (s *Service) planPython() (*Plan, error) {
 	p := &Plan{Kind: KindPython, Tools: []toolchain.Kind{toolchain.Python}}
+	// 同 planNode：venv、pip install 这些要跑在服务起来之前。
+	if s.Build != "" {
+		p.Build = shellCmd(s.Build)
+	}
 	if s.Run != "" {
 		p.Run = shellCmd(s.Run)
 		return p, nil

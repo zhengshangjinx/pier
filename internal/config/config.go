@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,7 +60,8 @@ type Service struct {
 	Kind string `yaml:"kind" json:"kind,omitempty"`
 	// Run 显式指定启动命令；留空则按 Kind 推断。
 	Run string `yaml:"run" json:"run,omitempty"`
-	// Build 显式指定编译命令；留空则按 Kind 推断（Node/Python 默认不编译）。
+	// Build 显式指定编译命令，启动前先跑一遍（装依赖这类前置步骤也写在这里）；
+	// 留空则按 Kind 推断，Node/Python 默认没有这一步。
 	Build string `yaml:"build" json:"build,omitempty"`
 	// Module 是 Maven 子模块名（如 shop-admin），Java 服务用它定位要跑哪个模块。
 	Module string `yaml:"module" json:"module,omitempty"`
@@ -251,6 +253,9 @@ func (c *Config) validateServices() error {
 		if s.Restart != "" && s.Restart != RestartOnFailure {
 			return fmt.Errorf("服务 %s 的 restart 无效：%s（可用：%s，或留空表示不自动重启）", s.Name, s.Restart, RestartOnFailure)
 		}
+		if msg := healthProblem(s.Health); msg != "" {
+			return fmt.Errorf("服务 %s 的 health %s", s.Name, msg)
+		}
 		for _, d := range s.DependsOn {
 			if strings.TrimSpace(d) == "" {
 				return fmt.Errorf("服务 %s 的 depends_on 里有空名字", s.Name)
@@ -274,6 +279,47 @@ func (c *Config) validateServices() error {
 		return fmt.Errorf("服务依赖成环：%s", strings.Join(cycle, " → "))
 	}
 	return nil
+}
+
+// healthProblem 检查健康探针地址能不能真的用，返回一句「哪里不对」，没问题时空串。
+// 留空是「这类服务没有健康接口」，正当，不算问题。
+//
+// 少了 scheme 的写法（localhost:8080/health）最坑：url.Parse 收得下——它把 localhost
+// 当成 scheme——于是探针每次都发不出去，服务一路挂到探针过期才被人看见，而那已经是
+// 三分钟之后的事，人不会把这两件事连起来。挡在存下来的那一刻：那时用户还知道
+// 自己想填什么。
+func healthProblem(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	// 地址里不该有空格：存下去之后是 client.Get 直接用的，它只会回一句
+	// 「invalid character " " in host name」，而那时人已经忘了自己填过什么。
+	if strings.ContainsAny(raw, " \t\n") {
+		return "里不能有空格（空格要写成 %20）"
+	}
+	// 漏了 scheme 的两种写法是同一件事，报出来的样子却不一样：localhost:8080/health
+	// 会被 url.Parse 收下（localhost 成了 scheme），127.0.0.1:8080/health 则直接报错
+	// （冒号落在第一段路径里）——后者的原话是「first path segment in URL cannot contain
+	// colon」，对着一个在填表单的人等于没说。所以先补上 http:// 试一次，成立就按这件事说。
+	//
+	// 只对纯 ASCII 这么判：url.Parse 对中文域名照收不误，不拦一道就会建议人家
+	// 去访问 http://我的服务 ，那种「建议」比不说还乱。
+	if !strings.Contains(raw, "://") && strings.IndexFunc(raw, func(r rune) bool { return r > 127 }) < 0 {
+		if u, err := url.Parse("http://" + raw); err == nil && u.Host != "" {
+			return "要写成完整的地址，补上 http:// —— http://" + raw
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Sprintf("不是一个能用的地址：%v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Sprintf("只认 http 与 https，这里是 %s://", u.Scheme)
+	}
+	if u.Host == "" {
+		return "里没有主机名，比如 http://localhost:8080/health"
+	}
+	return ""
 }
 
 // dependencyCycle 找出一条依赖环并原样返回，如 [a b a]；没有环时返回 nil。

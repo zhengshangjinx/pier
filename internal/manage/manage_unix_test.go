@@ -15,14 +15,17 @@ import (
 )
 
 // 正在跑的服务拒绝改名：进程、日志、状态文件都按名字记账，改了就成孤儿。
-func TestRenameServiceRefusesRunning(t *testing.T) {
+//
+// 改名只有一条路——在编辑表单里改名字，落盘的还是一次 SaveService。这道闸挂在
+// SaveService 上，所以这里从那条路走。
+func TestSaveServiceRefusesRenameWhileRunning(t *testing.T) {
 	h := newHarness(t)
 	self, pgid := os.Getpid(), syscall.Getpgrp()
 	st := &proc.State{Services: map[string]*proc.Entry{"alpha": {PID: self, PGID: pgid}}}
 	if err := st.Save(h.m.Config().StatePath()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.m.RenameService("alpha", "阿尔法"); err == nil {
+	if _, err := h.m.SaveService(ServiceIn{Name: "阿尔法", OrigName: "alpha", Dir: "a", Kind: "go"}); err == nil {
 		t.Fatal("运行中的服务不该能改名")
 	}
 	if _, err := h.onDisk().Find("alpha"); err != nil {
@@ -35,7 +38,7 @@ func TestRenameServiceRefusesRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.m.SetBusyProbe(func(name string) bool { return name == "alpha" })
-	if _, err := h.m.RenameService("alpha", "阿尔法"); err == nil {
+	if _, err := h.m.SaveService(ServiceIn{Name: "阿尔法", OrigName: "alpha", Dir: "a", Kind: "go"}); err == nil {
 		t.Error("正在启动中的服务不该能改名")
 	}
 	h.m.SetBusyProbe(func(string) bool { return false })

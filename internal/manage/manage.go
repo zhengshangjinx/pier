@@ -633,43 +633,12 @@ func (m *Manager) SaveSharedEnv(env map[string]string) (string, error) {
 
 // ── 改名与复制 ─────────────────────────────────────────────────────────────
 
-// RenameService 给一个服务改名。
+// renameGuard 是改名的一道闸：正在启停中的、正在运行的，一律不许改名。
 //
-// 正在运行的服务拒绝改名：进程、日志、状态文件全都按名字记账，改了名之后
-// 那一行进程就成了界面停不掉、命令行也找不着的孤儿（它还在写 logs/<旧名>/
-// 下面那份文件）。要改就先停——这条和删除是同一个理由。
-func (m *Manager) RenameService(oldName, newName string) (string, error) {
-	oldName, newName = strings.TrimSpace(oldName), strings.TrimSpace(newName)
-	if oldName == "" {
-		return "", errors.New("没有指定要改名的服务")
-	}
-	if msg := validServiceName(newName); msg != "" {
-		return "", errors.New(msg)
-	}
-	if oldName == newName {
-		return fmt.Sprintf("%s 的名字没有变", oldName), nil
-	}
-	st, err := m.storeFor()
-	if err != nil {
-		return "", err
-	}
-	if err := m.renameGuard(st, oldName); err != nil {
-		return "", err
-	}
-	if err := st.RenameService(oldName, newName); err != nil {
-		return "", err
-	}
-	if err := m.commit(st); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("已把 %s 改名为 %s%s", oldName, newName, m.moveServiceAssets(st, oldName, newName)), nil
-}
-
-// renameGuard 是改名共用的一道闸：正在启停中的、正在运行的，一律不许改名。
-//
-// 在编辑表单里改名字走的是 SaveService，在「⋯」里改名走的是 RenameService，
-// 两条路都得过这一关。各写一遍的话，迟早只有其中一条拦住——而漏掉的那条会留下
-// 一个界面停不掉、命令行也找不着的孤儿进程（它还在往 logs/<旧名>/ 里写）。
+// 改名只有一条路——在编辑表单里改名字（提交的还是一次 SaveService，只是带上
+// OrigName），所以这道闸挂在 SaveService 上。改名等于换了个服务：进程、日志、
+// 状态文件全按名字记账，改完名之后那一行进程就再也没有入口了（它还在往
+// logs/<旧名>/ 里写）。要改就先停——这条和删除是同一个理由。
 func (m *Manager) renameGuard(st *config.Config, name string) error {
 	if m.busyFn()(name) {
 		return fmt.Errorf("服务 %s 正在启动或停止中，等这一步结束再改名", name)

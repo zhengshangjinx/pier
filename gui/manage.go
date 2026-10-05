@@ -93,16 +93,6 @@ func (a *app) deleteService(name string) string {
 	return okJSON(msg)
 }
 
-// renameService 改名。旧名字和新名字分开传，而不是塞进 ServiceIn：
-// 改名只动名字这一处，表单里其余字段原样留在清单里。
-func (a *app) renameService(oldName, newName string) string {
-	msg, err := a.mgr.RenameService(oldName, newName)
-	if err != nil {
-		return errJSON(err.Error())
-	}
-	return okJSON(msg)
-}
-
 // duplicateService 复制一份。返回新服务的名字，界面拿它把表单打开在那一条上。
 func (a *app) duplicateService(name string) string {
 	out, err := a.mgr.DuplicateService(name)

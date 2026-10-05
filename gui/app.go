@@ -138,7 +138,6 @@ func (a *app) bindings() []binding {
 		{"pierSaveService", a.saveService},
 		{"pierDeleteService", a.deleteService},
 		{"pierClearHealth", a.clearHealth},
-		{"pierRenameService", a.renameService},
 		{"pierDuplicateService", a.duplicateService},
 		// 拖动排序：传的是「这一页现在的顺序」
 		{"pierMoveServices", a.moveServices},

@@ -40,7 +40,6 @@
     saveService: window.pierSaveService,
     deleteService: window.pierDeleteService,
     clearHealth: window.pierClearHealth,
-    renameService: window.pierRenameService,
     duplicateService: window.pierDuplicateService,
     // 拖动排序：送过去的是「这一页现在的顺序」，见 App 里 dragSvc 那一段。
     moveServices: window.pierMoveServices,
@@ -600,7 +599,6 @@
       case "killPortOwner": return { ok: true, msg: "已结束 PID " + args[1] + "，端口现已空出" };
       case "saveService": return { ok: true, msg: "已保存（演示模式，没有真的写文件）" };
       case "deleteService": return { ok: true, msg: "已处理（演示模式）" };
-      case "renameService": return { ok: true, msg: "已把 " + args[0] + " 改名为 " + args[1] };
       // name 单独给：界面拿它把表单开在新复制出来的那一条上。
       case "duplicateService":
         return { ok: true, name: args[0] + "-copy",

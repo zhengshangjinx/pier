@@ -703,15 +703,19 @@ func TestMoveGroupsDeclaresAndKeeps(t *testing.T) {
 	h.assertBaseUntouched()
 }
 
-// 改名：原地改、日志目录跟着搬、旧的编译产物清掉。
-func TestRenameServiceMovesLogsAndBinary(t *testing.T) {
+// 在编辑表单里改名字：提交的还是一次「保存」，落盘却必须是「改名 + 覆盖」。
+//
+// 直接按新名字 Upsert 的话会多出一条：旧的挂在旧名字下原样留着，而用户以为自己
+// 只是改了个名字。改名还必须发生在端口查重之前——查重是按名字把自己排除掉的，
+// 还挂着旧名字的那一条会被当成别人。
+func TestSaveServiceRenamesInPlace(t *testing.T) {
 	h := newHarness(t)
+	// 按名字存放的两处东西也摆好：改名之后它们得跟着走。
 	cfg := h.m.Config()
 	if err := os.MkdirAll(cfg.LogDirFor("alpha"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldLog := filepath.Join(cfg.LogDirFor("alpha"), "2026-09-01.log")
-	if err := os.WriteFile(oldLog, []byte("上一次运行的输出\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.LogDirFor("alpha"), "2026-09-01.log"), []byte("上一次运行的输出\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(cfg.BinDir(), 0o755); err != nil {
@@ -721,50 +725,6 @@ func TestRenameServiceMovesLogsAndBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	msg, err := h.m.RenameService("alpha", "阿尔法")
-	if err != nil {
-		t.Fatalf("改名失败：%v", err)
-	}
-	if !strings.Contains(msg, "阿尔法") {
-		t.Errorf("回执里没提新名字：%s", msg)
-	}
-	if _, err := h.onDisk().Find("alpha"); err == nil {
-		t.Error("旧名字还在数据文件里")
-	}
-	if got := strings.Join(h.onDisk().Names(), ","); got != "阿尔法,beta,gamma,delta" {
-		t.Errorf("顺序 = %s，改名不该换位置", got)
-	}
-	// 历史日志要跟着走，否则那条记录就再无入口了。
-	if _, err := os.Stat(filepath.Join(cfg.LogDirFor("阿尔法"), "2026-09-01.log")); err != nil {
-		t.Errorf("旧日志没有跟着搬过去：%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(cfg.BinDir(), "alpha")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("旧的编译产物没清掉")
-	}
-	h.assertBaseUntouched()
-
-	// 校验：空名字、带空格、重名都不许，名字没变则是个空操作。
-	if _, err := h.m.RenameService("beta", "   "); err == nil {
-		t.Error("空名字应当被拒绝")
-	}
-	if _, err := h.m.RenameService("beta", "带 空格"); err == nil {
-		t.Error("带空格的名字应当被拒绝")
-	}
-	if _, err := h.m.RenameService("beta", "gamma"); err == nil {
-		t.Error("改成已有的名字应当被拒绝")
-	}
-	if _, err := h.m.RenameService("beta", "beta"); err != nil {
-		t.Errorf("名字没变不该报错：%v", err)
-	}
-}
-
-// 在编辑表单里改名字：提交的还是一次「保存」，落盘却必须是「改名 + 覆盖」。
-//
-// 直接按新名字 Upsert 的话会多出一条：旧的挂在旧名字下原样留着，而用户以为自己
-// 只是改了个名字。改名还必须发生在端口查重之前——查重是按名字把自己排除掉的，
-// 还挂着旧名字的那一条会被当成别人。
-func TestSaveServiceRenamesInPlace(t *testing.T) {
-	h := newHarness(t)
 	msg, err := h.m.SaveService(ServiceIn{
 		Name: "阿尔法", OrigName: "alpha", Dir: "a", Kind: "go", Port: 1001,
 		Env: map[string]string{"APP_ENV": "dev"},
@@ -785,6 +745,14 @@ func TestSaveServiceRenamesInPlace(t *testing.T) {
 	if svc.Port != 1001 || svc.Env["APP_ENV"] != "dev" {
 		t.Errorf("改名后的字段不对：%+v", svc)
 	}
+	// 历史日志要跟着走，否则那条记录就再无入口了。
+	if _, err := os.Stat(filepath.Join(cfg.LogDirFor("阿尔法"), "2026-09-01.log")); err != nil {
+		t.Errorf("旧日志没有跟着搬过去：%v", err)
+	}
+	// 编译产物的名字也是服务名，改了名它就再也用不上（下次启动会照新名字重做一个）。
+	if _, err := os.Stat(filepath.Join(cfg.BinDir(), "alpha")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("旧的编译产物没清掉")
+	}
 	h.assertBaseUntouched()
 
 	// 名字没变时 OrigName 不该有任何作用。
@@ -801,6 +769,17 @@ func TestSaveServiceRenamesInPlace(t *testing.T) {
 	}
 	if _, err := h.onDisk().Find("beta"); err != nil {
 		t.Errorf("被拒绝的改名不该动到原来的那一条：%v", err)
+	}
+	// 空名字、带空格的名字也不许——名字同时是日志目录名与可执行文件名。
+	if _, err := h.m.SaveService(ServiceIn{
+		Name: "   ", OrigName: "beta", Dir: "b", Kind: "go",
+	}); err == nil {
+		t.Error("空名字应当被拒绝")
+	}
+	if _, err := h.m.SaveService(ServiceIn{
+		Name: "带 空格", OrigName: "beta", Dir: "b", Kind: "go",
+	}); err == nil {
+		t.Error("带空格的名字应当被拒绝")
 	}
 }
 
