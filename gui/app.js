@@ -234,6 +234,38 @@
   // 清单若是各写各的，迟早一份多一个少一个，而看的人只会去信其中一份。
   var DEMO_EXISTING = [47811, 47812, 47813, 47821, 47822, 47823, 47831, 47832];
 
+  // 概览那两格下面那对曲线在演示模式下的数据。
+  //
+  // 形状是刻意造的：CPU 在中段有一个尖峰（「刚才飙了一下」正是这条线存在的理由），
+  // 内存一路缓慢爬升（泄漏那件事只有这样才看得见）。两条都拍直了的话，
+  // 排版对不对根本看不出来——而演示数据要核对的恰恰是排版。
+  function demoHistory() {
+    // 40 个点、5 秒一个：横跨三分多钟，与真开一会儿的界面同量级。
+    var n = 40, step = 5000, t0 = Date.now() - (n - 1) * step;
+    var mk = function (cpuBase, cpuPeak, memFrom, memTo) {
+      return Array.from({ length: n }, function (_, i) {
+        var k = i / (n - 1);
+        var spike = cpuPeak * Math.exp(-Math.pow((k - 0.55) / 0.07, 2));
+        return { at: t0 + i * step,
+          cpu: Math.round((cpuBase + spike) * 10) / 10,
+          memBytes: Math.round(memFrom + (memTo - memFrom) * k) };
+      });
+    };
+    var MB = 1048576;
+    return {
+      services: mk(3, 42, 322 * MB, 344 * MB),
+      self: mk(0.4, 1.6, 58 * MB, 61 * MB),
+      // 「未分组」一个服务都没有：真实的那一路会是一串 0，画出来是一条摆正的平线。
+      // 演示里照旧给它一份，免得那一页在演示模式下少一样东西。
+      groups: {
+        "示例后端": mk(1.2, 30, 180 * MB, 196 * MB),
+        "示例服务": mk(2.4, 36, 132 * MB, 142 * MB),
+        "模拟服务": mk(0.6, 9, 26 * MB, 28 * MB),
+        "未分组": mk(0, 0, 0, 0)
+      }
+    };
+  }
+
   function demoState() {
     var mk = function (o) {
       return Object.assign({
@@ -395,6 +427,9 @@
       st.usage = { cpu: 0, memBytes: 0, procs: 0 };
       st.self = { cpu: 0.1, memBytes: 58720256, procs: 1 };
       st.busyCount = 0;
+      st.history = null;
+    } else {
+      st.history = demoHistory();
     }
     return st;
   }
@@ -1441,6 +1476,88 @@
     </div>`;
   }
 
+  // 概览那两格下面的历史曲线。采样点由后端攒着（internal/panel 的 history.go），
+  // 界面只负责画。
+  //
+  // 横轴按真实时间摆点，不是按下标等距：空闲时 5 秒一个点、有动作时 1 秒一个点，
+  // 按下标画会把「忙的那一分钟」拉成一大段，看着像飙了很久。
+  //
+  // 纵轴按这一路自己的最小 / 最大值归一，不是从 0 起：内存从 318 MB 涨到 341 MB，
+  // 从 0 画是一条压在顶上的直线，什么也看不出来——而「是不是一直在涨」正是这条线
+  // 要回答的问题之一。所以它只说形状，绝对值看格子里那个数字，
+  // 这一段横跨多久、落在哪个区间写在悬停提示里。
+  var SPARK_W = 100, SPARK_H = 20;
+
+  function sparkGeom(points, pick) {
+    var vals = points.map(pick);
+    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    var spanT = Math.max(1, points[points.length - 1].at - points[0].at);
+    var t0 = points[0].at;
+    // 上下各留一格，线不贴着边框走。
+    var pad = 3, inner = SPARK_H - pad * 2;
+    var xy = points.map(function (pt, i) {
+      var x = (i === 0 ? 0 : (pt.at - t0) / spanT) * SPARK_W;
+      // 一条平的线摆在正中间：贴顶或贴底都会被读成「到边界了」。
+      var y = hi > lo ? pad + (1 - (vals[i] - lo) / (hi - lo)) * inner : SPARK_H / 2;
+      return [Math.round(x * 100) / 100, Math.round(y * 100) / 100];
+    });
+    var line = xy.map(function (c, i) {
+      return (i ? "L" : "M") + c[0] + " " + c[1];
+    }).join(" ");
+    return { line: line, area: line + " L" + SPARK_W + " " + SPARK_H + " L0 " + SPARK_H + " Z",
+      lo: lo, hi: hi };
+  }
+
+  // 这一段横跨多久。形状得配上一个时长才读得懂：同样一条上扬的线，
+  // 跨 5 秒和跨 5 分钟说的是两件完全不同的事。
+  function spanText(points) {
+    var ms = points[points.length - 1].at - points[0].at;
+    if (ms < 60000) return Math.max(1, Math.round(ms / 1000)) + " 秒";
+    if (ms < 3600000) return Math.round(ms / 60000) + " 分钟";
+    return (Math.round(ms / 360000) / 10) + " 小时";
+  }
+
+  // 一行曲线。视图框是写死的 100×20，靠 preserveAspectRatio 拉满格子；
+  // 线宽用 non-scaling-stroke 挡住那次拉伸，不然后拉出来的线一头粗一头细。
+  function SparkRow(props) {
+    var token = A.theme.useToken().token;
+    var geom = props.geom;
+    return html`<div className="dc-spark-row" role="img" aria-label=${props.title}
+      title=${props.title}>
+      <span className="dc-spark-key" style=${{ fontSize: token.fontSizeSM,
+        color: token.colorTextTertiary }}>${props.label}</span>
+      <svg className="dc-spark-svg" viewBox=${"0 0 " + SPARK_W + " " + SPARK_H}
+        preserveAspectRatio="none">
+        <path d=${geom.area} fill="currentColor" opacity=".15"/>
+        <path d=${geom.line} fill="none" stroke="currentColor" stroke-width="1.5"
+          stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+      </svg>
+    </div>`;
+  }
+
+  // 「服务占用 / 本组占用」与「Pier 自身」两格里各摆一对：CPU 一条、内存一条。
+  //
+  // 两条都在，不做成二选一，理由与上面那条对比条一样：CPU 回答「刚才是不是烧起来了」，
+  // 内存回答「是不是一直在涨」，切一次就只能看见一半。两条各按自己的区间归一，
+  // 所以谁也不能拿来量另一条——绝对值在那行字上，以及格子里的数字上。
+  function UsageSpark(props) {
+    var token = A.theme.useToken().token;
+    var pts = props.points || [];
+    // 一个点画不出形状，两个点才是一条线。
+    if (pts.length < 2) return null;
+    var cpu = sparkGeom(pts, function (pt) { return pt.cpu || 0; });
+    var mem = sparkGeom(pts, function (pt) { return pt.memBytes || 0; });
+    var span = "最近 " + spanText(pts);
+    return html`<div className="dc-spark" style=${{ color: token.dcChartBar }}>
+      <div className="dc-spark-head" style=${{ fontSize: token.fontSizeSM,
+        color: token.colorTextTertiary }}>${span}</div>
+      <${SparkRow} label="CPU" geom=${cpu}
+        title=${span + "：CPU " + fmtCPU(cpu.lo) + " – " + fmtCPU(cpu.hi)}/>
+      <${SparkRow} label="内存" geom=${mem}
+        title=${span + "：内存 " + fmtMem(mem.lo) + " – " + fmtMem(mem.hi)}/>
+    </div>`;
+  }
+
   // 首页顶部的一排概览。
   //
   // 它回答两个问题：一是「我的服务现在怎么样」，二是机器变卡的时候，
@@ -1459,6 +1576,12 @@
     var token = A.theme.useToken().token;
     var c = tally(list);
     var n = list.length || 1;
+
+    // 这一页该画哪一路曲线：「全部服务」页是合计，分组页是这个分组的。
+    // 分组页上拿合计来画，曲线会和格子里那个数字各说各话。
+    var hist = data.history || {};
+    var histPage = props.scope === "all"
+      ? (hist.services || []) : ((hist.groups || {})[props.scope] || []);
 
     var bar = [
       { k: "running", v: c.running, color: token.colorSuccess, label: "运行中" },
@@ -1504,9 +1627,13 @@
                  「现在谁在吃」看它；内存只比相对大小（见下面那句说明），降一档。 */}
           <${Stat} icon=${IconPulse} label=${props.scope === "all" ? "服务占用" : "本组占用"}
             value=${fmtCPU(usage.cpu)} unit="CPU"
-            sub=${usage.procs ? fmtMem(usage.memBytes) + " · " + usage.procs + " 个进程" : "没有在跑的进程"}/>
+            sub=${usage.procs ? fmtMem(usage.memBytes) + " · " + usage.procs + " 个进程" : "没有在跑的进程"}>
+            <${UsageSpark} points=${histPage}/>
+          <//>
           <${Stat} icon=${IconGauge} label="Pier 自身" value=${fmtCPU(self.cpu)} unit="CPU"
-            sub=${fmtMem(self.memBytes) + " · " + (self.procs || 0) + " 个进程"}/>
+            sub=${fmtMem(self.memBytes) + " · " + (self.procs || 0) + " 个进程"}>
+            <${UsageSpark} points=${hist.self}/>
+          <//>
         <//>`}
         ${"" /* 对比条排在四格下面、同一张卡里：它是「服务占用」那一格的展开，
                拆成第二张卡就成了另起一件事。读不到用量时整条不出现（上面的告警已经说了）。 */}

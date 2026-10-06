@@ -285,6 +285,19 @@ body {
 }
 .dc-bar > span { display: block; height: 100%; }
 
+/* 概览那两格下面的历史曲线。每行左边一个词标住量的是什么，右边一条折线；
+   颜色不在 CSS 里定，由调用处给的 token.dcChartBar 走 currentColor 下来——
+   与「服务占用对比」那两根条同源，都是「量值」那一档的蓝。 */
+.dc-spark { margin-top: 12px; }
+.dc-spark-head { margin-bottom: 5px; }
+.dc-spark-row { display: flex; align-items: center; gap: 8px; }
+.dc-spark-row + .dc-spark-row { margin-top: 2px; }
+/* 词宽写死：两行的折线左端才会落在同一条竖线上。 */
+.dc-spark-key { flex: none; width: 28px; }
+/* 视图框那份坐标系是被拉满的（preserveAspectRatio="none"），
+   线宽靠 non-scaling-stroke 兜住，这里只管给一个高度。 */
+.dc-spark-svg { flex: 1; min-width: 0; height: 20px; display: block; }
+
 .dc-footnote { margin-top: 8px; line-height: 1.6; }
 
 /* 服务占用对比：概览卡里横跨一整行的一条，用 1px 的缝和上面四格分开。

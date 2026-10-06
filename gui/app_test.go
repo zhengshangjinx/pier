@@ -798,6 +798,11 @@ func TestUIFieldNamesExistInBackend(t *testing.T) {
 		// 服务行下面那句诊断。它同样嵌在服务里，得单列一个变量名：
 		// 写成 s.diag.reason 的话，比对的是 ServiceOut 上没有的 reason 键。
 		{[]string{"dg"}, keysOf(diag.Hit{}), "诊断"},
+		// 概览那两格下面的曲线。采样点是嵌在历史里的子结构，所以另起一个
+		// 变量名 pt（hist.services 是够得着的，再往里那一层就写不出来了）。
+		// 注意 pt 不能写成 p：p 是 PALETTE 在界面里的那个名字。
+		{[]string{"hist"}, keysOf(panel.HistoryOut{}), "历史曲线"},
+		{[]string{"pt"}, keysOf(panel.SampleOut{}), "历史采样点"},
 	}
 
 	for _, tg := range targets {

@@ -949,6 +949,30 @@ func TestLogPathPinsDayAndDirectory(t *testing.T) {
 	}
 }
 
+// TestStateCarriesHistory 钉住曲线是随面板的状态一起回去的。
+//
+// 两条路要分开：界面上那次 State() 顺手记一笔并带上曲线，而包级的 Snapshot
+// （`pier status --json` 走的那条）不攒也不带——那个输出是给脚本读的，
+// 凭空多一个只有界面用得上的键，等于让每个解析它的人多处理一样东西。
+func TestStateCarriesHistory(t *testing.T) {
+	h := newHarness(t)
+	out := h.p.State()
+	if !out.OK {
+		t.Fatalf("前提不成立：清单没加载好（%s）", out.Error)
+	}
+	if out.History == nil {
+		t.Fatal("面板的状态里应当带上曲线")
+	}
+	if len(out.History.Groups) == 0 {
+		t.Error("每一路分组的用量都得跟着回去，否则分组页上那格数字没有对应的曲线")
+	}
+
+	raw := Snapshot(h.p.cfg, h.p.sup, h.p.cfgPath, h.p.cfgSrc, "", nil, Notes{})
+	if raw.History != nil {
+		t.Error("命令行那份快照不该带上曲线")
+	}
+}
+
 func TestTailFileKeepsOnlyTheTail(t *testing.T) {
 	dir := t.TempDir()
 

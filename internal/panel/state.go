@@ -192,6 +192,12 @@ type StateOut struct {
 	// 都是 0。界面必须靠它把「读不到」和「什么都不占」分开——
 	// 两者在界面上长得一模一样，而含义正好相反。
 	MetricsErr string `json:"metricsError"`
+	// History 是最近若干次采样，概览那两格靠它画曲线（见 history.go）。
+	//
+	// 用指针是为了让 `pier status --json` 的输出原样不变：那份快照由包级的
+	// Snapshot 直接产出，没有面板攒下来的这一段，也就不该多出一个只有界面
+	// 用得上的键。
+	History *HistoryOut `json:"history,omitempty"`
 }
 
 // LogOut 是日志尾部内容的返回结构。
@@ -223,10 +229,15 @@ func (p *Panel) State() StateOut {
 		}
 	}
 	p.mu.Unlock()
-	return Snapshot(cfg, sup, cfgPath, cfgSrc, cfgErr, ops, Notes{
+	out := Snapshot(cfg, sup, cfgPath, cfgSrc, cfgErr, ops, Notes{
 		Restart: p.restartNote,
 		Deps:    p.depNote,
 	})
+	// 曲线顺手记在这一趟里：它要与上面那些数字出自同一次采样，而且只有真的
+	// 有人在读状态时才需要新点——没有哪个后台协程专门为它去跑一遍 ps。
+	p.hist.record(out, time.Now())
+	out.History = p.hist.snapshot()
+	return out
 }
 
 // Notes 是只有面板才知道的那几句按服务说的说明。命令行没有它们（传零值），

@@ -222,6 +222,10 @@ type Panel struct {
 	// 关掉界面再打开，那些进程还是原来那些，但「它起来的时候前置在不在」已经
 	// 没有地方问得出来。重启之后不再说，比说一句不知道是什么时候的事要好。
 	depNotes map[string][]string
+
+	// hist 是概览那两格下面那条曲线的采样（见 history.go）。每次读状态顺手
+	// 记一笔，自带一把锁，不共用 p.mu。
+	hist usageHistory
 }
 
 // New 建一个空面板并启动执行协程。清单要另外用 Load 装进来。
