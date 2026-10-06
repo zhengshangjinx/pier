@@ -419,6 +419,45 @@ body {
 
 .dc-group-name { font-weight: 600; }
 
+/* 分组标题整块可点：点一下把这一组收起来。
+   做成一整颗按钮而不是在名字前面挂一颗小三角——折叠省的是纵向的长度，
+   而一颗 14px 的三角摆在 1400px 宽的一行里几乎点不着。
+   按钮自己不画样子，外观仍由上面那几条 flex 规则给（它比 div 多出来的只有
+   默认边框、底色与字号继承），只在悬停与聚焦时回一声：不然鼠标划过去
+   看不出这一行能点。
+   「全部服务」以外它是 disabled（分组页上收起等于把整页收空），
+   所以把 UA 给禁用态的那套灰字一并压掉——它不是不能用的控件，只是这里没有折叠可言。 */
+button.dc-group-title {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.dc-group-title:disabled { cursor: default; }
+
+button.dc-group-title:not(:disabled):hover .dc-group-name { color: var(--dc-primary); }
+
+button.dc-group-title:focus-visible {
+  outline: 2px solid var(--dc-primary);
+  outline-offset: 3px;
+}
+
+/* 折叠那颗箭头：收起时朝右，展开时转成朝下。转的是它自己，不是整行。 */
+.dc-caret {
+  display: inline-flex;
+  align-items: center;
+  color: var(--dc-text3);
+  transition: transform .15s ease;
+  flex: none;
+}
+
+.dc-caret-open { transform: rotate(90deg); }
+
 .dc-count,
 .dc-kind,
 .dc-src-tag {

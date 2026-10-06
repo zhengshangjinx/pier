@@ -881,6 +881,8 @@
   var IconBroom = function (p) { return html`<${Ico} ...${p}><path d="M10.5 2.5L7.8 7.2"/><path d="M5.2 7.2h5.2l1.1 6.3H4.1z"/><path d="M6.6 10.2v3.3M9 10.2v3.3"/><//>`; };
   var IconAlert = function (p) { return html`<${Ico} ...${p}><circle cx="8" cy="8" r="5.8"/><path d="M8 5v3.4M8 10.8v.1"/><//>`; };
   var IconLayers = function (p) { return html`<${Ico} ...${p}><path d="M8 2.5l5.5 2.8L8 8.1 2.5 5.3z"/><path d="M2.5 8.2L8 11l5.5-2.8"/><path d="M2.5 11L8 13.8l5.5-2.8"/><//>`; };
+  // 分组折叠那个小箭头。画的是朝右的一颗，展开时由 CSS 转 90° 变成朝下。
+  var IconChevron = function (p) { return html`<${Ico} ...${p}><path d="M6.3 3.7L10.6 8l-4.3 4.3"/><//>`; };
   var IconRefresh = function (p) { return html`<${Ico} ...${p}><path d="M13.2 8a5.2 5.2 0 1 1-2.1-4.2"/><path d="M12.3 1.5l1.1 2.5-2.6.6"/><//>`; };
   var IconPulse = function (p) { return html`<${Ico} ...${p}><path d="M1.8 8.4h2.6l1.5-4 2.6 7.4 1.7-4.6h4"/><//>`; };
   var IconGauge = function (p) { return html`<${Ico} ...${p}><path d="M2.6 11.5a5.6 5.6 0 1 1 10.8 0"/><path d="M8 9.2l2.4-2.6"/><circle cx="8" cy="9.6" r=".6"/><//>`; };
@@ -4055,6 +4057,9 @@
     // 筛着筛着点进一个分组接着看，是很自然的下一步。
     var sq = React.useState(""), search = sq[0], setSearch = sq[1];
     var qf = React.useState("all"), quick = qf[0], setQuick = qf[1];
+    // 收起的是哪几组，只记名字。这一份**不落盘**：折叠是「先把不看的收起来」
+    // 的临时视图，下次打开还照上次收着，人就以为服务不见了。
+    var cl = React.useState({}), collapsed = cl[0], setCollapsed = cl[1];
     var searchRef = React.useRef(null);
     // 拖动排序：正在拖的名字（服务与分组各一份）和落在哪一行的哪半边。
     // 落点存成 {name, after} 而不是一个下标：行是会重排的，下标一会儿就对不上了。
@@ -4827,6 +4832,19 @@
       });
     };
 
+    // 折叠只在「全部服务」页上有：分组页上本来就只有一组，收起来等于把整页收空。
+    // 筛选时也不折叠（`canCollapse` 为假，标题那一行当场变成不可点）：搜索是
+    // 「帮我找 X」，把匹配的结果收在折起来的那一组里，就是把它藏起来。
+    var canCollapse = selected === "all" && !filtering;
+
+    var toggleGroup = function (name) {
+      setCollapsed(function (prev) {
+        var next = Object.assign({}, prev);
+        if (next[name]) delete next[name]; else next[name] = true;
+        return next;
+      });
+    };
+
     var groupActs = function (g, list) {
       var label = "「" + g.name + "」的服务";
       return html`<div className="dc-group-acts">
@@ -5161,19 +5179,27 @@
             var usageText = selected === "all" && !data.metricsError && gUsage && gUsage.procs > 0
               ? "CPU " + fmtCPU(gUsage.cpu) + " · " + fmtMem(gUsage.memBytes) + " · " + gUsage.procs + " 进程"
               : "";
+            var folded = canCollapse && !!collapsed[g.name];
             return html`<section className="dc-group-block" key=${g.name}>
               <div className="dc-group-head">
-                <div className="dc-group-title">
+                <button type="button" className="dc-group-title"
+                  disabled=${!canCollapse}
+                  aria-expanded=${canCollapse ? !folded : null}
+                  title=${canCollapse ? (folded ? "展开这一组" : "收起这一组") : null}
+                  onClick=${function () { toggleGroup(g.name); }}>
+                  ${canCollapse ? html`<span
+                    className=${"dc-caret" + (folded ? "" : " dc-caret-open")}>
+                    <${IconChevron}/></span>` : null}
                   <span className="dc-group-name" style=${{ fontSize: token.fontSizeLG }}>${g.name}</span>
                   <span className="dc-count" style=${{ fontSize: token.fontSizeSM,
                     color: token.colorTextSecondary, background: token.colorFillTertiary }}>${list.length}</span>
                   ${gt.running + gt.starting ? html`<span className="dc-group-live" style=${sm}>
                     <${Dot} status="running"/>${gt.running + gt.starting} 个在跑</span>` : null}
                   ${usageText ? html`<span style=${sm}>${usageText}</span>` : null}
-                </div>
+                </button>
                 ${groupActs(g, list)}
               </div>
-              <div className="dc-list">
+              ${folded ? null : html`<div className="dc-list">
                 ${list.length === 0
                   ? html`<div className="dc-list-empty" style=${sm}>
                       ${"这个分组还是空的。在「添加应用」里把分组选成「" + g.name + "」即可。"}
@@ -5182,7 +5208,7 @@
                       return html`<${ServiceRow} key=${s.name} svc=${s} act=${act}
                         dnd=${svcDnd} metricsErr=${data.metricsError}/>`;
                     })}
-              </div>
+              </div>`}
             </section>`;
           })}
           <//>`}
