@@ -220,6 +220,12 @@
   // 拍出来的会是一张平平无奇的可编辑页面，还看不出哪里不对。
   var demoReadOnly = false;
   var demoReadOnlySrc = "";
+  // 一份服务都没有的清单：空清单那一屏（ScanFirstRun）只在 services 为空时才出现，
+  // 而演示数据里永远摆着八个服务，不放这个开关就永远拍不到它。
+  // 第二个开关是「进去之后要不要顺手扫一遍」——截图时没人去点那颗按钮，
+  // 而空白的第一屏与扫完之后的那一屏是两件事，都要看一眼。
+  var demoFirstRun = false;
+  var demoFirstRunScan = false;
 
   // 演示数据里「清单已经写掉的那几个端口」，就是 demoState 里那八个服务声明的。
   // 写一份共用的：后端那边 `Existing` 处处都是 cfg.UsedPorts()，同一屏数据里两份
@@ -256,7 +262,7 @@
         usage: { cpu: 0, memBytes: 0, procs: 0 }
       }, o);
     };
-    return {
+    var st = {
       ok: true,
       configPath: demoReadOnly ? "/Users/you/Desktop/pier.yaml" : "/Users/you/.pier/services.json",
       // 目录跟着清单走，不是写死 ~/.pier：只读那份在桌面上，真实的 configDir
@@ -377,6 +383,84 @@
           note: "不参与全部启停，点了名才起" })
       ]
     };
+    // 空清单那一屏：服务、分组、用量全部归零。不是只把 services 清掉——
+    // 留着一排分组和「4.4% CPU」的一屏，看着像是界面算错了，而核对排版的人
+    // 会去查后端（这份 fixture 的用处正是别让他去查）。
+    if (demoFirstRun) {
+      st.services = [];
+      st.groups = [{ name: "未分组", count: 0, builtin: true,
+        usage: { cpu: 0, memBytes: 0, procs: 0 } }];
+      st.usage = { cpu: 0, memBytes: 0, procs: 0 };
+      st.self = { cpu: 0.1, memBytes: 58720256, procs: 1 };
+      st.busyCount = 0;
+    }
+    return st;
+  }
+
+  // 演示用的目录扫描结果：五种样子各摆一条，前三种是加得进来的（端口读到的、
+  // 模块里认出来的、端口没读到的），后两种是加不进来的（重名、目录名转不出名字）。
+  // 后两种才是这一屏最需要核对的地方——跳过原因写不清楚的话，用户看见的是
+  // 一个灰掉却不说为什么的勾，只能自己猜，那正是这一屏要避免的事。
+  function demoScan() {
+    return { ok: true, msg: "",
+      absPath: "/Users/you/workspace/shop",
+      items: [
+        { absPath: "/Users/you/workspace/shop/shop-api", dirShort: "~/workspace/shop/shop-api",
+          name: "shop-api", kind: "go", module: "", script: "",
+          plan: "编译: go build -o /Users/you/.pier/cache/bin/shop-api .　运行: /Users/you/.pier/cache/bin/shop-api",
+          port: 47811, portFrom: "config.yaml 的 server.port",
+          health: "http://localhost:47811/api/health",
+          evidence: ["有 go.mod", "里面有 main 包", "名字取自目录名 shop-api",
+            "端口读自 config.yaml 的 server.port"] },
+        // 多模块 Maven：每条服务都指着反应堆根目录（子模块起不来），所以这两行的
+        // 路径一模一样，只有模块名不同。勾选按行号认，正是为了这一种。
+        { absPath: "/Users/you/workspace/shop", dirShort: "~/workspace/shop",
+          name: "shop-admin", kind: "java", module: "shop-admin", script: "",
+          plan: "编译: mvn -DskipTests -DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=true -Djib.skip=true -pl shop-admin -am install　运行: mvn -pl shop-admin spring-boot:run",
+          port: 47812, portFrom: "application.yml 的 server.port",
+          health: "http://localhost:47812/actuator/health",
+          evidence: ["根 pom.xml 里声明了模块 shop-admin",
+            "shop-admin 里声明了 spring-boot-maven-plugin",
+            "名字取自 Maven 子模块 shop-admin", "端口读自 application.yml 的 server.port"] },
+        { absPath: "/Users/you/workspace/shop", dirShort: "~/workspace/shop",
+          name: "shop-app", kind: "java", module: "shop-app", script: "",
+          plan: "编译: mvn -DskipTests -DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=true -Djib.skip=true -pl shop-app -am install　运行: mvn -pl shop-app spring-boot:run",
+          port: 47822, portFrom: "application.yml 的 server.port（健康检查打管理端口 47825）",
+          health: "http://localhost:47825/actuator/health",
+          evidence: ["根 pom.xml 里声明了模块 shop-app",
+            "shop-app 里声明了 spring-boot-maven-plugin",
+            "名字取自 Maven 子模块 shop-app",
+            "端口读自 application.yml 的 server.port（健康检查打管理端口 47825）"] },
+        { absPath: "/Users/you/workspace/shop/shop-web", dirShort: "~/workspace/shop/shop-web",
+          name: "shop-web", kind: "node", module: "", script: "dev",
+          plan: "运行: npm run dev", port: 47823,
+          portFrom: ".env 的 VITE_PORT", health: "http://localhost:47823/",
+          evidence: ["有 package.json，scripts 里有 dev", "名字取自目录名 shop-web",
+            "端口读自 .env 的 VITE_PORT"] },
+        // 端口没读到的那一条：不能替它挑一个号（挑错了两个服务就抢同一个端口），
+        // 所以那一格写「端口没读到」，加进清单之后再填。
+        { absPath: "/Users/you/workspace/shop/mock-payment", dirShort: "~/workspace/shop/mock-payment",
+          name: "mock-payment", kind: "python", module: "", script: "",
+          plan: "运行: python3 main.py", port: 0, portFrom: "", health: "",
+          evidence: ["有 requirements.txt 或 pyproject.toml，还有 main.py",
+            "名字取自目录名 mock-payment"] },
+        // 重名：另一个目录也叫 shop-api，而清单里那条 shop-api 已经占着这个名字。
+        // 名字是清单里的主键，端口一样不一样都不管用。
+        { absPath: "/Users/you/workspace/shop-v2/shop-api", dirShort: "~/workspace/shop-v2/shop-api",
+          name: "shop-api", kind: "go", module: "", script: "",
+          plan: "编译: go build -o /Users/you/.pier/cache/bin/shop-api .　运行: /Users/you/.pier/cache/bin/shop-api",
+          port: 47814, portFrom: "config.yaml 的 server.port",
+          health: "http://localhost:47814/v2/health",
+          evidence: ["有 go.mod", "里面有 main 包", "名字取自目录名 shop-api",
+            "端口读自 config.yaml 的 server.port"],
+          skip: "清单里已经有一条叫「shop-api」的服务，改个名字再加" },
+        // 目录名转不出服务名：中文目录名没法当服务名（进程名、日志目录都要用它）。
+        { absPath: "/Users/you/workspace/shop/新项目", dirShort: "~/workspace/shop/新项目",
+          name: "", kind: "node", module: "", script: "start",
+          plan: "运行: npm start", port: 0, portFrom: "", health: "",
+          evidence: ["有 package.json，scripts 里有 start"],
+          skip: "目录名转不出可用的服务名，用「添加应用」自己起一个" }
+      ] };
   }
 
   // 演示用的端口扫描结果。四种样子各摆一条：Pier 正跑着的、清单里已经有位置的
@@ -515,6 +599,12 @@
             origin: { kind: "editor", label: "VS Code", chain: ["VS Code"] } } };
       case "portScan":
         return demoPortScan();
+      // 空清单那一屏的两个接口（见 ScanFirstRun）。加完不摆结果：演示数据里
+      // 那几个服务跟这份扫描结果对不上，硬凑一份出来只会让人去查后端。
+      case "scanDir": return demoScan();
+      case "addScanned":
+        return { ok: true, msg: "已添加 " + (JSON.parse(args[0] || "[]")).length + " 个服务",
+          added: [], failed: [] };
       case "adoptPort":
         // 读不到工作目录的那一条（47855）照真正的后端那样回一句失败：
         // 演示数据里留着它，是为了这条失败路径也能在界面上看一遍。
@@ -1900,6 +1990,174 @@
         })}
       </div>` : null}
     <//>`;
+  }
+
+  // ── 空清单的第一屏：选一个目录，我扫一遍 ─────────────────────────────────
+
+  // 空清单时摆的不是一句「还没有任何服务」，而是一条立刻能往下走的路：选一个
+  // 目录、扫一遍、勾上、加进来。第一次打开 Pier 的人手上没有配置，让他先去读一遍
+  // 文档再手填一堆字段，这一屏就白留了。
+  //
+  // 每一行都必须写着「凭什么」：类型是看见哪个文件才认的、名字是从哪儿转出来的、
+  // 端口是从哪个配置文件读的。一份猜出来的名单，少一句依据就只敢逐条打开核对，
+  // 那一屏同样白做。
+  //
+  // 端口读不到就写「没读到」，不替它挑一个空闲端口：挑出来的那个会跟着清单一直
+  // 走下去，被注入成 PORT、被拿去拼健康检查地址，而它凭空的出处过两天没人记得。
+  function ScanFirstRun(props) {
+    var message = props.message;
+    // 变量名 sco / sci 是 TestUIFieldNamesExistInBackend 的索引：前者对应
+    // manage.ScanOut，后者是里面的每一条 manage.ScanItemOut。通用名（data、scan）
+    // 在这个文件里都已经名花有主，所以这里用两个短名，让那条测试还认得出来。
+    var so = React.useState(null), sco = so[0], setSco = so[1];
+    var ds = React.useState(""), dir = ds[0], setDir = ds[1];
+    var ls = React.useState(false), loading = ls[0], setLoading = ls[1];
+    var as = React.useState(false), adding = as[0], setAdding = as[1];
+    var ps = React.useState({}), picked = ps[0], setPicked = ps[1];
+    var token = A.theme.useToken().token;
+    var sm = { fontSize: token.fontSizeSM, color: token.colorTextTertiary };
+
+    var run = async function (target) {
+      var d = String(target === undefined ? dir : target).trim();
+      if (!d) { message.info("先选一个目录"); return; }
+      setDir(d);
+      setLoading(true);
+      try {
+        var r = await call("scanDir", d);
+        setSco(r);
+        // 认出来的默认全勾上：点「全部添加」的人要的是把这些加进来，
+        // 而不是先一个个去勾。加不了的那几条不勾，但照样列出来——扫到了却不显示，
+        // 读到的会是「Pier 没看见这个项目」。
+        //
+        // 勾选按**行号**认，不按目录：多模块 Maven 的每一条都指着反应堆根目录
+        // （子模块不能单独起，见 manage.scanMaven），一个目录对上好几行，
+        // 用目录当键就成了一勾全勾。名字也不行——同一批里重名的那条会被标成跳过，
+        // 于是两个「shop-api」同时在列表里。
+        var next = {};
+        (r.items || []).forEach(function (it, i) { next[i] = !it.skip; });
+        setPicked(next);
+      } catch (ex) {
+        setSco(null);
+        message.error(ex.message);
+      }
+      setLoading(false);
+    };
+
+    // 演示模式下挂载后自己扫一遍（见 __pierDemo.firstRun）。走的是与点「扫一遍」
+    // 完全相同的那一步，不是另摆一份结果——摆出来的话，拍到的就不是真正会显示的
+    // 那一屏了，而这一屏要核对的东西恰恰是「后端的话被摆成什么样」。
+    React.useEffect(function () {
+      if (!DEMO || !demoFirstRunScan) return;
+      demoFirstRunScan = false;
+      run("/Users/you/workspace/shop");
+    }, []);
+
+    var browse = async function () {
+      try {
+        var r = await call("pickDirectory", dir);
+        if (r.canceled || !r.dir) return;
+        setDir(r.dir);
+        run(r.dir);
+      } catch (ex) {
+        message.error(ex.message);
+      }
+    };
+
+    // 交给后端的只有表单上真正有的那几栏。依据（evidence）与展示用的短路径不带
+    // 过去：那是给人看的，写进清单只会在 services.json 里多存一份会过时的副本。
+    var items = (sco && sco.items) || [];
+    var chosen = items.filter(function (it, i) { return picked[i]; });
+    var add = async function () {
+      setAdding(true);
+      try {
+        var r = await call("addScanned", JSON.stringify(chosen.map(function (it) {
+          return { name: it.name, dir: it.absPath, kind: it.kind, module: it.module,
+            script: it.script, port: it.port, health: it.health };
+        })));
+        // 一条失败不影响别的（见 manage.AddScanned），所以这里要把没加成的
+        // 那几条连原因一起摆出来，不能只说一句「添加完成」。
+        if ((r.failed || []).length) {
+          message.warning(r.msg + "：" + r.failed.map(function (f) {
+            return f.name + "（" + f.reason + "）";
+          }).join("；"));
+        } else {
+          message.success(r.msg);
+        }
+        setSco(null);
+        setPicked({});
+        props.onSaved();
+      } catch (ex) {
+        message.error(ex.message);
+      }
+      setAdding(false);
+    };
+
+    return html`<div className="dc-firstrun">
+      <div className="dc-firstrun-head">
+        <div className="dc-firstrun-title" style=${{ fontSize: token.fontSizeLG }}>
+          ${items.length ? "认出来 " + items.length + " 个项目" : "还没有任何服务"}</div>
+        <div style=${sm}>${items.length
+          ? "勾上要加进来的。端口、启动方式与依据都写在每一行里；不确定的先加进来，之后在表单里改。"
+          : "选一个项目目录，Pier 扫一遍：认出来的项目连类型、端口、启动方式与依据一起摆出来，勾上就加进来。"}</div>
+      </div>
+
+      ${"" /* 输入框与「浏览…」包在一个 Space.Compact 里，与表单那颗一样的形状：
+             两条路通向同一个值，分开摆会像是两个不同的东西。 */}
+      <${A.Space.Compact} block className="dc-firstrun-pick">
+        <${A.Input} value=${dir} placeholder="项目文件夹的绝对路径，或者直接选一个"
+          onChange=${function (ev) { setDir(ev.target.value); }}
+          onPressEnter=${function () { run(); }}/>
+        <${A.Button} onClick=${browse}>浏览…<//>
+        <${A.Button} type="primary" loading=${loading}
+          onClick=${function () { run(); }}>扫一遍<//>
+      <//>
+
+      ${sco && !items.length ? html`<${A.Alert} type="info" showIcon
+        className="dc-firstrun-none" message=${sco.msg}/>` : null}
+
+      ${items.length ? html`<div className="dc-list dc-firstrun-list">
+        ${items.map(function (sci, idx) {
+          var bits = [KIND_LABEL[sci.kind] || sci.kind,
+            sci.port > 0 ? "端口 " + sci.port : "端口没读到"];
+          if (sci.module) bits.push("模块 " + sci.module);
+          return html`<div className="dc-row dc-firstrun-row" key=${idx}>
+            <${A.Checkbox} checked=${!!picked[idx]} disabled=${!!sci.skip}
+              onChange=${function (ev) {
+                var next = Object.assign({}, picked);
+                next[idx] = ev.target.checked;
+                setPicked(next);
+              }}/>
+            <div className="dc-row-text">
+              <div className="dc-row-title">
+                <span className="dc-row-name">${sci.name || "这个名字用不了"}</span>
+                ${bits.map(function (b, i) {
+                  return html`<span className="dc-kind" key=${i} style=${{
+                    fontSize: token.fontSizeSM, color: token.colorTextSecondary,
+                    background: token.colorFillTertiary }}>${b}</span>`;
+                })}
+              </div>
+              <div className="dc-row-sub" style=${sm}>
+                <span className="dc-mono" title=${sci.absPath}>${sci.dirShort}</span></div>
+              <div className="dc-row-sub" style=${sm}>
+                ${"依据：" + (sci.evidence || []).join("；")}</div>
+              ${"" /* 加不了的那条把原因写在它能写的地方：不说为什么，
+                     用户只会以为扫描漏了它。 */}
+              ${sci.skip
+                ? html`<div className="dc-row-sub" style=${{ fontSize: token.fontSizeSM,
+                    color: token.colorWarning }}>${sci.skip}</div>`
+                : html`<div className="dc-row-sub" style=${sm}>${sci.plan ||
+                    "启动方式还没认出来，加进来之后再在表单里补"}</div>`}
+            </div>
+          </div>`;
+        })}
+      </div>` : null}
+
+      <div className="dc-firstrun-foot">
+        <${A.Button} type="primary" loading=${adding} disabled=${!chosen.length}
+          onClick=${add}>${"添加选中的 " + chosen.length + " 个"}<//>
+        <${A.Button} type="text" onClick=${props.onManual}>手动添加一个服务<//>
+      </div>
+    </div>`;
   }
 
   // ── 端口选择 ─────────────────────────────────────────────────────────────
@@ -4303,6 +4561,9 @@
         return null;
       };
       window.__pierDemo = {
+        // 第一份状态回来没有。截图脚本靠它决定什么时候开弹窗：不能等「服务列表
+        // 非空」——空清单那一屏要拍的正是一份没有服务的清单。
+        ready: function () { return !!data; },
         names: function () {
           return {
             services: services.map(function (s) { return s.name; }),
@@ -4321,6 +4582,14 @@
         readonly: function (on, src) {
           demoReadOnly = on !== false;
           demoReadOnlySrc = src || "";
+          setData(demoState());
+        },
+        // 空清单的第一屏（ScanFirstRun）只在一条服务都没有时才出现，而演示数据里
+        // 永远摆着八个。第二个参数给 true 就顺带把「扫出来的名单」也摆上——
+        // 那才是这一屏要核对的部分，而扫一遍得先点一下、再等一次异步回来。
+        firstRun: function (scanned) {
+          demoFirstRun = true;
+          demoFirstRunScan = scanned !== false;
           setData(demoState());
         },
         // 偏好设置页的那几种样子：有新版本、下载中、下载好了、跳过了、
@@ -4412,6 +4681,9 @@
             if (arg) window.__pierDemo.update(arg);
           } else if (kind === "readonly") {
             window.__pierDemo.readonly(true, arg || "");
+          } else if (kind === "firstRun") {
+            // 第二个参数给 "scan" 就顺带把扫完的名单也摆上（留空是空白的第一屏）。
+            window.__pierDemo.firstRun(arg === "scan");
           }
         }
       };
@@ -4819,11 +5091,14 @@
 
           ${!data ? html`<${A.Skeleton} active paragraph=${{ rows: 6 }}/>` : null}
 
-          ${data && data.ok !== false && services.length === 0 ? html`<${A.Empty} className="dc-empty"
-            description="还没有任何服务。选一个项目目录，Pier 会认出类型、读出端口、推出启动命令。">
-            <${A.Button} type="primary" onClick=${function () { setForm({ open: true, editing: null }); }}>
-              添加第一个应用<//>
-          <//>` : null}
+          ${"" /* 空清单时这一屏不是一句「还没有服务」，而是一条能立刻往下走的路。
+                 只读清单时不摆它：那份清单里没有服务也不让我们往里面加，
+                 摆一屏添加的口子等于每一步都通向同一个错误。 */}
+          ${data && data.ok !== false && services.length === 0 ? (readOnly
+            ? html`<${A.Empty} className="dc-empty"
+                description="这份清单里没有服务，而它是只读的。切回本机数据之后才能添加。"/>`
+            : html`<${ScanFirstRun} message=${msg.message} onSaved=${refresh}
+                onManual=${function () { setForm({ open: true, editing: null }); }}/>`) : null}
 
           ${"" /* 筛完一个都不剩：整块列表收成一句。留着一块空标题配「这个分组还是空的」
                  会让人以为分组真的空了，而它只是被筛掉了。 */}

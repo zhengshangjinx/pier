@@ -587,6 +587,38 @@ body {
 
 .dc-empty { padding: 40px 0; }
 
+/* ── 空清单的第一屏 ───────────────────────────────────────────────────── */
+
+/* 整块居中收窄：这一屏只有三样东西（一句话、一个目录选择、一份清单），
+   铺满 1400px 时那句话会拉成一条横穿整屏的长条，读的人得来回摆头。 */
+.dc-firstrun { max-width: 760px; margin: 40px auto 0; }
+
+.dc-firstrun-head { margin-bottom: 14px; }
+.dc-firstrun-title { font-weight: 600; margin-bottom: 4px; }
+.dc-firstrun-pick { margin-bottom: 16px; }
+
+/* 一份「暂无可加」的说明与列表之间留一口气，免得看着像列表的一部分。 */
+.dc-firstrun-none { margin-bottom: 16px; }
+
+.dc-firstrun-list { margin-bottom: 16px; }
+
+/* 两列：左边勾选框，右边几行文字。行与行之间不留 gap，与别的列表一个形状
+   （见上面 .dc-row 那条注释）。
+   勾选框顶到第一行：这一行的文字能有五六行长，居中的话勾会飘到「依据」那一排，
+   与它要勾的服务名隔着两行。 */
+.dc-firstrun-row { grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; align-items: start; }
+.dc-firstrun-row .ant-checkbox-wrapper { margin-top: 3px; }
+
+/* 别处的 .dc-row-sub 是单行省略的，这一屏反过来：整行存在的理由就是把「凭什么」
+   写出来，省略掉一半等于没说，所以让它换行，行高自己长。
+   路径那一格例外——它长且没有读的价值，仍旧单行省略，全文在 title 里。 */
+.dc-firstrun-row .dc-row-sub { white-space: normal; align-items: flex-start; }
+.dc-firstrun-row .dc-row-sub .dc-mono {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+
+.dc-firstrun-foot { display: flex; align-items: center; gap: 8px; }
+
 .dc-hidden-bar { margin-bottom: 16px; }
 
 

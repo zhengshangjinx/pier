@@ -11,6 +11,7 @@ import (
 
 	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/ideaconf"
+	"github.com/zhengshangjinx/pier/internal/manage"
 )
 
 // cmdImport 读取 IDEA 的 .idea/workspace.xml，把它里面已有的运行配置
@@ -176,7 +177,8 @@ func (im *importer) addProject(projDir, prefixOverride string) error {
 		prefix = defaultPrefix(projDir)
 	}
 	// Java 的 Spring Boot 配置不写 module，只能靠主类源码反推。
-	modules := mavenModules(projDir)
+	// 子模块名的读法在 internal/manage：扫描与导入问的是同一个问题。
+	modules := manage.MavenModules(projDir)
 
 	for _, rc := range rcs {
 		if !rc.IsService() {
@@ -287,12 +289,13 @@ func (im *importer) convert(rc ideaconf.RunConfig, projDir, prefix string, modul
 		svc.kind = config.KindNode
 		svc.script = rc.Script
 		if svc.script == "" {
-			svc.script = firstNodeScript(rc.Dir)
+			svc.script = manage.NodeScript(rc.Dir)
 		}
-		svc.port = config.ReadNodePort(rc.Dir)
+		var portFrom string
+		svc.port, portFrom = config.ReadNodePort(rc.Dir)
 		if svc.port > 0 {
 			svc.health = fmt.Sprintf("http://localhost:%d/", svc.port)
-			svc.notes = append(svc.notes, fmt.Sprintf("端口 %d ← .env", svc.port))
+			svc.notes = append(svc.notes, fmt.Sprintf("端口 %d ← %s", svc.port, portFrom))
 		}
 
 	default:
@@ -635,17 +638,6 @@ func leadingMajor(name string) string {
 		i++
 	}
 	return javaMajor(name[:i])
-}
-
-// firstNodeScript 在 package.json 里挑一个约定俗成的启动脚本。
-func firstNodeScript(dir string) string {
-	scripts := nodeScripts(dir)
-	for _, c := range nodeScriptCandidates {
-		if scripts[c] {
-			return c
-		}
-	}
-	return ""
 }
 
 // yamlScalar 在必要时给 YAML 标量加引号。

@@ -770,6 +770,10 @@ func TestUIFieldNamesExistInBackend(t *testing.T) {
 		// 端口扫描与纳管。「scan」不能改叫 data：那个名字上挂的是面板状态结构。
 		{[]string{"scan"}, keysOf(manage.PortScanOut{}), "端口扫描"},
 		{[]string{"sp"}, keysOf(manage.ScannedPort{}), "扫描到的端口"},
+		// 空清单那一屏的目录扫描。这两个名字不能省成 data / item：前者是面板状态，
+		// 后者已经被表单里那条运行配置的预填值占了。
+		{[]string{"sco"}, keysOf(manage.ScanOut{}), "目录扫描"},
+		{[]string{"sci"}, keysOf(manage.ScanItemOut{}), "扫描到的项目"},
 		{[]string{"logData"}, keysOf(panel.LogOut{}), "日志"},
 		// SDK 管理页与表单里那次工具链预演。
 		//

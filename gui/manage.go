@@ -69,6 +69,29 @@ func (a *app) saveService(payload string) string {
 	return okJSON(msg)
 }
 
+// scanDir 扫一个目录，列出里面认出来的项目（空清单那一屏用的就是它）。
+func (a *app) scanDir(dir string) string {
+	out, err := a.mgr.ScanDir(dir)
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	return marshal(out)
+}
+
+// addScanned 把用户勾中的那几条一次加进来。收的是 JSON 数组（webview 绑定的形状），
+// 解析在这一层做完，业务层只看见成形的字段。
+func (a *app) addScanned(payload string) string {
+	var items []manage.ServiceIn
+	if err := json.Unmarshal([]byte(payload), &items); err != nil {
+		return errJSON("提交的内容无法解析：" + err.Error())
+	}
+	out, err := a.mgr.AddScanned(items)
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	return marshal(out)
+}
+
 // saveSharedEnv 收的是界面那块多行文本解析出来的对象（见 app.js 的 textToEnv），
 // 与 saveService 一样，解析留在这一层，业务层只看见成形的字段。
 func (a *app) saveSharedEnv(payload string) string {

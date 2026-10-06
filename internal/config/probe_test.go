@@ -110,31 +110,52 @@ func TestReadNodePort(t *testing.T) {
 		name string
 		body string
 		want int
+		from string
 	}{
-		{"VITE_PORT", "VITE_PORT=3106\n", 3106},
-		{"带引号", "VITE_PORT=\"3106\"\n", 3106},
-		{"带空格", "VITE_PORT = 3106\n", 3106},
-		{"PORT 兜底", "PORT=3006\n", 3006},
-		{"注释不算", "# VITE_PORT=3106\n", 0},
-		{"认不出的键不误伤", "VITE_PORTX=1\n", 0},
+		{"VITE_PORT", "VITE_PORT=3106\n", 3106, ".env 的 VITE_PORT"},
+		{"带引号", "VITE_PORT=\"3106\"\n", 3106, ".env 的 VITE_PORT"},
+		{"带空格", "VITE_PORT = 3106\n", 3106, ".env 的 VITE_PORT"},
+		{"行首 export", "export VITE_PORT=3106\n", 3106, ".env 的 VITE_PORT"},
+		// 行首那个 BOM 用转义写：记事本存出来的 .env 常带着它，不去掉的话
+		// 第一个键名前面多三个字节，那个变量永远读不到，而文件看着完全正常。
+		{"带 BOM", "\ufeff" + "VITE_PORT=3106\n", 3106, ".env 的 VITE_PORT"},
+		{"PORT 兜底", "PORT=3006\n", 3006, ".env 的 PORT"},
+		{"注释不算", "# VITE_PORT=3106\n", 0, ""},
+		{"认不出的键不误伤", "VITE_PORTX=1\n", 0, ""},
+		// 出处要说准：值是 PORT 里来的，就不能写成一句「.env 的 VITE_PORT」。
+		{"出处跟着键走", "PORT=3006\nVITE_PORT=3106\n", 3106, ".env 的 VITE_PORT"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, dir, ".env", c.body)
-			if got := ReadNodePort(dir); got != c.want {
-				t.Fatalf("ReadNodePort = %d，想要 %d", got, c.want)
+			got, from := ReadNodePort(dir)
+			if got != c.want || from != c.from {
+				t.Fatalf("ReadNodePort = (%d, %q)，想要 (%d, %q)", got, from, c.want, c.from)
 			}
 		})
 	}
 }
 
-func TestReadNodePortPrefersDotEnvOverDevelopment(t *testing.T) {
+// 后缀那几个一份都不读：它们各有各的优先级（Vite 与 Next 正好相反），
+// 替用户挑一份，挑错了就是界面上那句「端口读自 …」在说假话。
+func TestReadNodePortIgnoresSuffixedEnvFiles(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, ".env", "VITE_PORT=3106\n")
 	writeFile(t, dir, ".env.development", "VITE_PORT=9999\n")
-	if got := ReadNodePort(dir); got != 3106 {
-		t.Fatalf("ReadNodePort = %d，想要 3106（.env 优先）", got)
+	writeFile(t, dir, ".env.local", "VITE_PORT=9998\n")
+	got, from := ReadNodePort(dir)
+	if got != 0 || from != "" {
+		t.Fatalf("ReadNodePort = (%d, %q)，想要没有——只认 .env 这一份", got, from)
+	}
+}
+
+// 读不动的一份就当没读到，但也不能因此报错：这里只是猜一个端口给界面做参考，
+// 真有问题时启动服务那一步会指着行号说出来。
+func TestReadNodePortToleratesBadEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ".env", "VITE_PORT=\"3106\n")
+	if got, from := ReadNodePort(dir); got != 0 || from != "" {
+		t.Fatalf("ReadNodePort = (%d, %q)，想要没有", got, from)
 	}
 }
 

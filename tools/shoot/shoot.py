@@ -31,6 +31,8 @@
     / filter <关键词> / quick <all|running|attention>（页头那行搜索与筛选）
     / readonly <来源>（只读清单：页头说明位、收起的编辑入口与拖动）
       来源留空按「打开清单…」那种算，给「命令行指定」就拍命令行那种说法
+    / firstRun <scan>（空清单的第一屏；给「scan」就连扫出来的名单一起拍，
+      留空是刚打开、什么都还没扫的样子）
 主题是 light / dark / system，留空表示跟随系统。
 
 环境变量 PIER_SHOT_JS 是一段在演示钩子跑完之后执行的 JS，用来够到演示钩子
@@ -107,10 +109,13 @@ def open_modal(kind, arg, theme=""):
         return ""
     # 主题先切，再开弹窗：弹窗的浮层挂在 body 上，必须先有正确的算法。
     #
-    # 必须等服务列表真的回来了再开：演示数据是异步的，首次渲染时 services 还是
+    # 必须等第一份状态真的回来了再开：演示数据是异步的，首次渲染时 services 还是
     # 空数组，这时按名字找服务会找不到，弹窗就打不开——而截图看上去只像是
     # 「这个弹窗没做」。为了让这种情况出声，app.js 那边的 find() 找不到时会
     # console.error，不再退回第一个服务。
+    #
+    # 等的是 ready()（有没有拿到数据）而不是「服务列表非空」：空清单那一屏
+    # 要拍的正是一份一条服务都没有的清单。
     body = "; ".join(calls) + (find_step() if kind == "log" else "")
     return """
 <script>
@@ -119,8 +124,7 @@ def open_modal(kind, arg, theme=""):
     var t = setInterval(function () {
       n++;
       if (n > 400) { clearInterval(t); document.title = "DEMO HOOK MISSING"; return; }
-      if (!window.__pierDemo) return;
-      if (window.__pierDemo.names().services.length === 0) return;
+      if (!window.__pierDemo || !window.__pierDemo.ready()) return;
       clearInterval(t); %s;
     }, 25);
   })();

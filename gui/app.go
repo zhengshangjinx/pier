@@ -138,6 +138,9 @@ func (a *app) bindings() []binding {
 		{"pierKillPortOwner", a.killPortOwner},
 		{"pierInspectDir", a.inspectDir},
 		{"pierSaveService", a.saveService},
+		// 扫一个目录，认出里面的项目，勾选后一次加进来
+		{"pierScanDir", a.scanDir},
+		{"pierAddScanned", a.addScanned},
 		{"pierDeleteService", a.deleteService},
 		{"pierClearHealth", a.clearHealth},
 		{"pierDuplicateService", a.duplicateService},

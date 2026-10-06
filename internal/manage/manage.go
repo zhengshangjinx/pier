@@ -370,19 +370,6 @@ func cleanDeps(in []string) []string {
 func (m *Manager) SaveService(in ServiceIn) (string, error) {
 	svc := in.toService()
 
-	if msg := validServiceName(svc.Name); msg != "" {
-		return "", errors.New(msg)
-	}
-	if svc.Dir == "" {
-		return "", errors.New("请填写项目目录")
-	}
-	if strings.HasPrefix(svc.Dir, "~") {
-		return "", errors.New("目录不支持 ~，请写绝对路径或相对工作空间的路径")
-	}
-	if svc.Port < 0 || svc.Port > 65535 {
-		return "", errors.New("端口必须在 1-65535 之间")
-	}
-
 	st, err := m.storeFor()
 	if err != nil {
 		return "", err
@@ -392,8 +379,10 @@ func (m *Manager) SaveService(in ServiceIn) (string, error) {
 	// 一次 commit。分两次写的话，改名成功而保存失败会留下「名字是新的、内容是旧的」
 	// 这种中间态，而用户看到的是一句失败提示——两边的说法对不上。
 	//
-	// 必须在端口查重之前：查重是按名字把自己排除掉的，还挂着旧名字的那一条
-	// 会被当成别人、报「端口已经被服务 <自己> 用了」。
+	// 必须排在 fillService 之前：那里按名字沿用旧的环境变量与工具链，也按名字把自己
+	// 从端口查重里排除掉。还挂着旧名字的那一条会被当成别人，于是旧值丢了、
+	// 端口还会报「已经被服务 <自己> 用了」。这一步只改手里这份清单——storeFor
+	// 每次都从磁盘读一份新的，后面任何一步失败都不会落盘。
 	renamed := false
 	orig := strings.TrimSpace(in.OrigName)
 	if orig != "" && orig != svc.Name {
@@ -406,6 +395,44 @@ func (m *Manager) SaveService(in ServiceIn) (string, error) {
 		renamed = true
 	}
 
+	plan, err := fillService(st, in, svc)
+	if err != nil {
+		return "", err
+	}
+
+	st.Upsert(svc)
+	st.AddGroup(svc.Group)
+	if err := m.commit(st); err != nil {
+		return "", err
+	}
+	// 日志目录与编译产物是按名字放的，改名之后要跟着搬。放在 commit 之后：
+	// 这一步出问题只在回执尾巴上记一句，不把「已经保存好了」翻成一次失败。
+	if renamed {
+		return fmt.Sprintf("已保存 %s（%s）%s", svc.Name, plan.String(),
+			m.moveServiceAssets(st, orig, svc.Name)), nil
+	}
+	return fmt.Sprintf("已保存 %s（%s）", svc.Name, plan.String()), nil
+}
+
+// fillService 校验一条服务定义，把调用方没传的字段按清单里的旧值补齐，
+// 返回推导出的启动方案。它只读 st，一个字节都不改。
+//
+// 保存一条与「扫描后批量添加」共用这一份：名字、目录、端口撞车、环境变量键名的
+// 判据只写在这里一处，两个入口才不会一个拦住、一个放过去。
+func fillService(st *config.Config, in ServiceIn, svc *config.Service) (*config.Plan, error) {
+	if msg := validServiceName(svc.Name); msg != "" {
+		return nil, errors.New(msg)
+	}
+	if svc.Dir == "" {
+		return nil, errors.New("请填写项目目录")
+	}
+	if strings.HasPrefix(svc.Dir, "~") {
+		return nil, errors.New("目录不支持 ~，请写绝对路径或相对工作空间的路径")
+	}
+	if svc.Port < 0 || svc.Port > 65535 {
+		return nil, errors.New("端口必须在 1-65535 之间")
+	}
+
 	// 端口不许和别的服务撞。不查的话，第二个服务起不来，报的却是「端口已被占用
 	// （可能已在 IDEA 或其它终端运行）」——占着它的正是自己的另一个服务，
 	// 这句话会把人引到完全错误的方向去。
@@ -416,7 +443,7 @@ func (m *Manager) SaveService(in ServiceIn) (string, error) {
 	if svc.Port > 0 {
 		for _, other := range st.Services {
 			if other.Name != svc.Name && other.Port == svc.Port {
-				return "", fmt.Errorf("端口 %d 已经被服务 %s 用了，换一个", svc.Port, other.Name)
+				return nil, fmt.Errorf("端口 %d 已经被服务 %s 用了，换一个", svc.Port, other.Name)
 			}
 		}
 	}
@@ -454,35 +481,24 @@ func (m *Manager) SaveService(in ServiceIn) (string, error) {
 	}
 	for k := range svc.Env {
 		if !envKeyRe.MatchString(k) {
-			return "", fmt.Errorf("环境变量名 %q 不合法：只能用字母、数字、下划线，且不能以数字开头", k)
+			return nil, fmt.Errorf("环境变量名 %q 不合法：只能用字母、数字、下划线，且不能以数字开头", k)
 		}
 	}
 
 	// 用真实的启动方案校验一遍：命令推不出来的服务，存进去也只是个点不动的按钮。
+	// 目录是相对工作空间写的时先补成绝对——启动方案要拿它去认类型、找入口文件。
 	probe := *svc
 	if !filepath.IsAbs(probe.Dir) {
 		probe.Dir = filepath.Join(st.Dir(), probe.Dir)
 	}
 	plan, err := probe.Plan(st)
 	if err != nil {
-		return "", errors.New("这个目录没法推导出启动命令：" + err.Error())
+		return nil, errors.New("这个目录没法推导出启动命令：" + err.Error())
 	}
 	if svc.Kind == "" {
 		svc.Kind = plan.Kind
 	}
-
-	st.Upsert(svc)
-	st.AddGroup(svc.Group)
-	if err := m.commit(st); err != nil {
-		return "", err
-	}
-	// 日志目录与编译产物是按名字放的，改名之后要跟着搬。放在 commit 之后：
-	// 这一步出问题只在回执尾巴上记一句，不把「已经保存好了」翻成一次失败。
-	if renamed {
-		return fmt.Sprintf("已保存 %s（%s）%s", svc.Name, plan.String(),
-			m.moveServiceAssets(st, orig, svc.Name)), nil
-	}
-	return fmt.Sprintf("已保存 %s（%s）", svc.Name, plan.String()), nil
+	return plan, nil
 }
 
 // validServiceName 校验服务名，返回空串表示通过。

@@ -73,13 +73,13 @@ func DeriveFacts(dir, kind string) Facts {
 		}
 
 	case KindNode:
-		p := ReadNodePort(dir)
+		p, from := ReadNodePort(dir)
 		if p <= 0 {
 			return Facts{}
 		}
 		return Facts{
 			Port:     p,
-			PortFrom: ".env 的 VITE_PORT",
+			PortFrom: from,
 			Health:   fmt.Sprintf("http://localhost:%d/", p),
 		}
 	}
@@ -181,31 +181,33 @@ func unquote(s string) string {
 }
 
 // ReadNodePort 从 .env 里取前端端口；Vite 工程的端口通常写在这里。
-func ReadNodePort(dir string) int {
-	for _, name := range []string{".env", ".env.development", ".env.local"} {
-		f, err := os.Open(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if strings.HasPrefix(line, "#") {
+//
+// 只读 .env 这一份：后缀那几个（.env.local / .env.development）是各框架自成一套的
+// 地方，优先级互不相同，替用户决定只会在两边打架时更难解释——与注入环境变量时
+// 只认 EnvFileName 是同一条规矩。解析也走同一个 ParseEnvFile：BOM、引号、行首
+// export 这些坑只在那一处踩，否则同一个文件两处读出两个值。
+//
+// 第二个返回值是「端口是从哪儿读来的」那半句话（文件 + 键名），读不到时是空串。
+// 它要原样摆到界面上（manage.ScanItemOut.Evidence），所以必须写对：Grep 出来的
+// 号码与随手挑的一个，差别全在这一句上。
+func ReadNodePort(dir string) (int, string) {
+	kv, err := LoadEnvFile(filepath.Join(dir, EnvFileName))
+	if err != nil {
+		// 解析不了就当没读到。这里只是猜一个端口给界面做参考，
+		// 而那份文件真的有问题时，启动服务那一步会指着行号报出来。
+		return 0, ""
+	}
+	for _, key := range []string{"VITE_PORT", "PORT"} {
+		for _, e := range kv {
+			if e.Key != key {
 				continue
 			}
-			for _, key := range []string{"VITE_PORT", "PORT"} {
-				if rest, ok := strings.CutPrefix(line, key); ok {
-					rest = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), "="))
-					if p := atoiTrim(rest); p > 0 {
-						f.Close()
-						return p
-					}
-				}
+			if p := atoiTrim(e.Value); p > 0 {
+				return p, EnvFileName + " 的 " + key
 			}
 		}
-		f.Close()
 	}
-	return 0
+	return 0, ""
 }
 
 // SanitizeName 把目录名转成适合做服务名的形式。
