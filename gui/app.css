@@ -758,6 +758,19 @@ body {
    给主按钮留的那 88px 起步宽度——那是给「启动 / 停止」那类文字按钮定的。 */
 .dc-log-row .dc-row-actions > .ant-btn:first-child { min-width: 0; margin-right: 0; }
 
+/* 「这一天的日志写得太多」那句提醒，挂在日期区间下面。
+   与工具链预演里那条警告同一种形状（图标 + 一句话，警示色），但那个类
+   长在别页上，名字也对不上这里的事。整句话要留全、允许折行：重点在后半截
+   ——按这个量写满保留期是多少——把它省略掉，这句提醒就只剩「有点大」三个字。 */
+.dc-log-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  min-width: 0;
+  color: var(--dc-warning);
+}
+
 @media (max-width: 900px) {
   .dc-log-row { grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 12px; }
 }

@@ -412,26 +412,45 @@ func showLog(cfg *config.Config, svc *config.Service, n int, follow bool) int {
 }
 
 // cmdLogSize 列出日志目录的占用，按服务从大到小。
+//
+// 表格与 --json 走同一份 panel.LogUsageOf：同一个数字在两种输出里必须是同一个说法，
+// 各自算一遍迟早一个「23.6 MB」一个「24 MB」（而它正是「清哪几个」的依据）。
 func cmdLogSize(cfg *config.Config, jsonOut bool) int {
+	usage := panel.LogUsageOf(cfg)
 	if jsonOut {
-		return printJSON(panel.LogUsageOf(cfg))
+		return printJSON(usage)
 	}
-	usage := proc.LogUsage(cfg.LogDir(), proc.LogKeepDays, time.Now())
 	rows := make([][]string, 0, len(usage.Services))
 	for _, s := range usage.Services {
 		span := view.Dash
 		if s.Newest != "" {
 			span = s.Oldest + " ~ " + s.Newest
 		}
-		rows = append(rows, []string{s.Name, view.Bytes(s.Bytes), fmt.Sprintf("%d", s.Files), span})
+		rows = append(rows, []string{s.Name, s.Size, fmt.Sprintf("%d", s.Files), span})
 	}
 	if len(rows) == 0 {
 		fmt.Println("还没有任何日志。")
 		return 0
 	}
 	renderTable([]string{"服务", "占用", "文件数", "覆盖日期"}, rows)
-	fmt.Printf("\n合计 %s（%d 个文件）　目录：%s\n", view.Bytes(usage.Bytes), usage.Files, usage.Dir)
+	fmt.Printf("\n合计 %s（%d 个文件）　目录：%s\n", usage.Size, usage.Files, usage.Dir)
 	fmt.Printf("保留最近 %d 天；清理超期日志：pier logs --clean\n", usage.KeepDays)
+
+	// 单日写得太多的单挑出来说：这件事在表格里看不出来（合计可能很正常，
+	// 而它正按那个速度往下写），却正是把磁盘吃掉的那一个。话由后端给
+	// （见 panel.logBigNote），界面与这里说的是同一句。
+	var loud []panel.LogServiceOut
+	for _, s := range usage.Services {
+		if s.BigNote != "" {
+			loud = append(loud, s)
+		}
+	}
+	if len(loud) > 0 {
+		fmt.Printf("\n⚠ 单日写得太多（提醒线 %s）：\n", usage.DayWarn)
+		for _, s := range loud {
+			fmt.Printf("  %-14s %s\n", s.Name, s.BigNote)
+		}
+	}
 	return 0
 }
 

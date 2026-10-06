@@ -376,6 +376,7 @@ Java 服务的编译步骤固定带 `-DskipDocker=true -Ddocker.skip=true -Ddock
 ├── state.json      进程状态（PID / PGID），用来在重开 Pier 后认领服务
 ├── update.json     上次查到哪一版（发布说明、产物名、ETag）
 ├── restart.lock    自动重启巡检的独占锁，同时开两个宿主也只有一边会去拉
+├── restarts.json   自动重启的记账（每个服务救过几次），关掉界面再打开也还在
 ├── gui.lock        界面开着时由它占着，命令行据此拒绝替换文件
 ├── logs/<服务名>/<日期>.log
 ├── logs/update/<日期>.log

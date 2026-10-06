@@ -27,6 +27,18 @@ import (
 // 两周是「够回溯一周前那次失败，又不至于让日志目录无限长」的经验值。
 const LogKeepDays = 14
 
+// LogDayWarnBytes 是单日日志的提醒线，超过就提一句。
+//
+// 封顶做不到：日志 fd 是服务进程自己继承的（见 Supervisor.StartContext），
+// Pier 这边没有一个还能往里写的句柄，也就没有一个地方拦得住它写多少——
+// 除非改成由 Pier 转写（那要接管每一个子进程的 stdout），代价远大于这件事。
+// 能做的是把最大的那一天摆出来：一个刷屏的 dev server 一天能写几百兆，
+// 按保留期乘下去就是几个 G，而这件事得有人看见。
+//
+// 64 MB 是「明显不正常」的量级：正常服务一天几十 KB 到几兆，
+// 到这个数的多半是在刷错误或者打整份响应体。
+const LogDayWarnBytes = 64 << 20
+
 // LogServiceOut 是一个服务的日志占用，供「日志」设置页按服务列出。
 type LogServiceOut struct {
 	Name string `json:"name"`
@@ -36,6 +48,12 @@ type LogServiceOut struct {
 	// Oldest / Newest 是它覆盖的日期区间（取自文件名），没有日志时为空。
 	Oldest string `json:"oldest"`
 	Newest string `json:"newest"`
+	// Biggest / BiggestBytes 是写得最多的那一天与它的大小，没有日志时为空。
+	//
+	// 单看合计看不出问题：十四天分摊下来，一天 300 MB 和一天 3 MB 的合计可能差不多，
+	// 而要不妙得多的是前者——它还在按这个速度写。所以留下最大的那一天本身。
+	Biggest      string `json:"biggest"`
+	BiggestBytes int64  `json:"biggestBytes"`
 }
 
 // LogUsageOut 是日志目录的整体占用。
@@ -173,6 +191,9 @@ func LogUsage(root string, keepDays int, now time.Time) LogUsageOut {
 				}
 				if d > svc.Newest {
 					svc.Newest = d
+				}
+				if fi.Size() > svc.BiggestBytes {
+					svc.Biggest, svc.BiggestBytes = d, fi.Size()
 				}
 			}
 		}

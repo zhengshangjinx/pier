@@ -513,19 +513,24 @@
       case "logUsage":
         // 字节数与换算好的文字都要给：界面只负责排版，换算在后端（view.Bytes），
         // 和命令行 `pier logs --size` 是同一个数。合计与分项也要真的对得上。
-        return { ok: true, dir: "/Users/you/.pier/logs", bytes: 24771197, size: "23.6 MB",
-          files: 36, keepDays: 14,
+        //
+        // 头一条是刻意超了单日提醒线的（dayWarn）：那句提醒只有超过时才出现，
+        // 演示数据里没有这么一条，?demo=1 下就永远拍不到它，排版对不对没人看得见。
+        return { ok: true, dir: "/Users/you/.pier/logs", bytes: 1725870899, size: "1.6 GB",
+          files: 36, keepDays: 14, dayWarn: "64 MB",
           services: [
-            { name: "shop-admin", bytes: 16777216, size: "16 MB", files: 14,
-              oldest: "2026-09-18", newest: "2026-10-01" },
+            { name: "shop-admin", bytes: 1717986918, size: "1.6 GB", files: 14,
+              oldest: "2026-09-18", newest: "2026-10-01",
+              biggest: "2026-10-01", biggestSize: "398 MB",
+              bigNote: "2026-10-01 单日写了 398 MB，按这个量写满 14 天就是 5.4 GB" },
             { name: "shop-app", bytes: 5452595, size: "5.2 MB", files: 9,
-              oldest: "2026-09-22", newest: "2026-10-01" },
+              oldest: "2026-09-22", newest: "2026-10-01", bigNote: "" },
             { name: "demo-web", bytes: 1677722, size: "1.6 MB", files: 7,
-              oldest: "2026-09-25", newest: "2026-10-01" },
+              oldest: "2026-09-25", newest: "2026-10-01", bigNote: "" },
             { name: "demo-admin", bytes: 655360, size: "640 KB", files: 4,
-              oldest: "2026-09-28", newest: "2026-10-01" },
+              oldest: "2026-09-28", newest: "2026-10-01", bigNote: "" },
             { name: "mock-payment", bytes: 98304, size: "96 KB", files: 2,
-              oldest: "2026-09-30", newest: "2026-10-01" }
+              oldest: "2026-09-30", newest: "2026-10-01", bigNote: "" }
           ] };
       case "pruneLogs": return { ok: true, msg: args[0]
         ? "已删除 3 个日志文件，释放 2.4 MB"
@@ -2779,8 +2784,11 @@
       ${!lu && !err ? html`<${A.Skeleton} active paragraph=${{ rows: 5 }}/>` : null}
 
       ${lu ? html`<div className="dc-sdk-note">
+        ${"" /* 提醒线由后端给（lu.dayWarn）：它和清理时用的天数一样，只该有一个出处。
+               日志封不了顶——写它的那个进程握着 fd，见 proc.LogDayWarnBytes——
+               所以这里是「摆出来给人看」，不是「挡住了」。 */}
         <span>${"一天一个文件，放在各自的目录里；每个服务启动时顺手清掉自己超过 "
-          + lu.keepDays + " 天的。"}</span>
+          + lu.keepDays + " 天的。单日写超过 " + lu.dayWarn + " 的会在下面标出来。"}</span>
         <${A.Space.Compact}>
           <${A.Button} icon=${e(IconBroom)} loading=${busy === "prune:"}
             onClick=${function () { run("prune:", function () { return call("pruneLogs", ""); }); }}>
@@ -2831,6 +2839,14 @@
                             : luSvc.oldest + " ~ " + luSvc.newest)
                           : "没有日志"}</span>
                     </div>
+                    ${"" /* 单日写得太多。整句照抄后端给的说法（见 panel.logBigNote），
+                           不进 title、不缩成一颗标记：这句话的后半截——「按这个量写满
+                           保留期是多少」——正是这一页要回答的事（该清谁、清完能省多少），
+                           而悬停才看得见的字等于没写。 */}
+                    ${hasVal(luSvc.bigNote) ? html`<div className="dc-log-warn"
+                      style=${{ fontSize: token.fontSizeSM }}>
+                      ${e(IconAlert, { size: 12 })}<span>${luSvc.bigNote}</span>
+                    </div>` : null}
                   </div>
                   <div className="dc-log-size" style=${{ fontSize: token.fontSizeLG }}>${luSvc.size}</div>
                   <div className="dc-row-actions">

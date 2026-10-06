@@ -468,6 +468,15 @@ type LogServiceOut struct {
 	// Oldest / Newest 是它覆盖的日期区间（取自文件名），没有日志时为空。
 	Oldest string `json:"oldest"`
 	Newest string `json:"newest"`
+	// Biggest / BiggestSize 是写得最多的那一天与它的大小。
+	Biggest      string `json:"biggest"`
+	BiggestBytes int64  `json:"biggestBytes"`
+	BiggestSize  string `json:"biggestSize"`
+	// BigNote 是「这一天写得太多了」的那句话，没超线时为空。
+	//
+	// 话在后端写、界面照说，和 Diag / RestartNote 同一个做法：同一件事在界面上
+	// 与 `pier logs --size` 上必须一字不差，而两处各写一句迟早会走样。
+	BigNote string `json:"bigNote"`
 }
 
 // LogUsageOut 是日志目录的整体占用。
@@ -478,8 +487,9 @@ type LogUsageOut struct {
 	Size  string `json:"size"`
 	Files int    `json:"files"`
 	// KeepDays 由后端给出而不是让界面写死：界面上那句「保留最近 N 天」
-	// 必须和真正在清理时用的天数出自同一个数。
-	KeepDays int `json:"keepDays"`
+	// 必须和真正在清理时用的天数出自同一个数。DayWarn 同理（单日提醒线）。
+	KeepDays int    `json:"keepDays"`
+	DayWarn  string `json:"dayWarn"`
 	// Services 按占用从大到小排（proc 那边排好的，这里不动顺序）。
 	Services []LogServiceOut `json:"services"`
 }
@@ -499,16 +509,34 @@ func LogUsageOf(cfg *config.Config) LogUsageOut {
 	raw := proc.LogUsage(cfg.LogDir(), proc.LogKeepDays, time.Now())
 	out := LogUsageOut{
 		OK: raw.OK, Dir: raw.Dir, Bytes: raw.Bytes, Size: view.Bytes(raw.Bytes),
-		Files: raw.Files, KeepDays: raw.KeepDays,
+		Files: raw.Files, KeepDays: raw.KeepDays, DayWarn: view.Bytes(proc.LogDayWarnBytes),
 		Services: make([]LogServiceOut, 0, len(raw.Services)),
 	}
 	for _, s := range raw.Services {
 		out.Services = append(out.Services, LogServiceOut{
 			Name: s.Name, Bytes: s.Bytes, Size: view.Bytes(s.Bytes), Files: s.Files,
 			Oldest: s.Oldest, Newest: s.Newest,
+			Biggest: s.Biggest, BiggestBytes: s.BiggestBytes, BiggestSize: view.Bytes(s.BiggestBytes),
+			BigNote: logBigNote(s, raw.KeepDays),
 		})
 	}
 	return out
+}
+
+// logBigNote 说清「哪一天写得太多、再这么写下去是多少」，没超线时返回空串。
+//
+// 后半句才是重点：单说「单日 300 MB」还有人觉得无所谓，乘上保留期才是它真正的代价。
+// 乘出来的是「按这个量写满 N 天的合计」——服务今天已经写了这么多，这不是预测，
+// 是它眼下的速度。
+func logBigNote(s proc.LogServiceOut, keepDays int) string {
+	if s.Biggest == "" || s.BiggestBytes < proc.LogDayWarnBytes {
+		return ""
+	}
+	note := fmt.Sprintf("%s 单日写了 %s", s.Biggest, view.Bytes(s.BiggestBytes))
+	if keepDays > 0 {
+		note += fmt.Sprintf("，按这个量写满 %d 天就是 %s", keepDays, view.Bytes(s.BiggestBytes*int64(keepDays)))
+	}
+	return note
 }
 
 // busyNames 返回此刻不该动日志的服务：正在跑的，以及排队中 / 编译中 / 启动中的。

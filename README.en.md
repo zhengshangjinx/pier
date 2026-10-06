@@ -407,6 +407,7 @@ Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=
 ├── state.json      process state (PID / PGID) used to reclaim services
 ├── update.json     what the last check found (release notes, asset name, ETag)
 ├── restart.lock    exclusive lock for the auto-restart sweep, so only one host sweeps
+├── restarts.json   auto-restart ledger (how often each service was rescued); survives a restart
 ├── gui.lock        held while the GUI runs; the CLI reads it before replacing files
 ├── logs/<service>/<date>.log
 ├── logs/update/<date>.log

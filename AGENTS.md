@@ -244,6 +244,8 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
   另有 `sdks`「SDK 管理」里手动添加的目录、`sdkDefaults` 各语言的全局默认、`updateCheck`
   自动检查开关与 `updateSkipped` 跳过的版本）、`state.json`（进程状态）、
   `update.json`（上次查到哪一版，见「更新与版本」）、`gui.lock`（界面开着时占着）、
+  `restarts.json`（自动重启的记账，与 `restart.lock` 一样属于「这台机器」而不是某一份
+  清单，见「出事与通知」）、
   `logs/`、`cache/bin/`、`cache/update/`。`PIER_HOME` 可整体换位置（测试一律设它，
   绝不碰真实数据）。环境变量与启动命令在表单「高级设置」里可编辑。
   偏好的默认值只在 `config.defaultSettings()` 写一份（`gui/app.go` 的 `settingsScript`

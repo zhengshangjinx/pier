@@ -265,6 +265,19 @@ func TestRecoverCrashedDoesNotPileUp(t *testing.T) {
 	}
 }
 
+// waitOwns 等这个面板把独占权接过去，最多等两个巡检周期再多一点。
+func waitOwns(t *testing.T, p *Panel) bool {
+	t.Helper()
+	deadline := time.Now().Add(2*restartPoll + time.Second)
+	for time.Now().Before(deadline) {
+		if p.OwnsRestarts() {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return p.OwnsRestarts()
+}
+
 // TestSecondPanelDoesNotOwnRestarts 钉着「自动重启只由拿到独占权的那个进程跑」。
 //
 // 同一台机器上可以同时开着图形界面和 pier api。两个巡检看着同一个状态文件、
@@ -285,13 +298,79 @@ func TestSecondPanelDoesNotOwnRestarts(t *testing.T) {
 		t.Error("第二个面板也拿到了独占权，两边会各巡检一遍")
 	}
 
-	// 第一个交回之后，第三个就该拿得到——否则一次异常退出会让这台机器
-	// 到下次重启为止都没有自动重启。
+	// 第一个退出之后由第二个接过去。这一步必须真等巡检自己再抢一次，
+	// 不能只看「再建一个面板拿不拿得到」：拿它的那个窗口可能是异常退出
+	// （崩溃、被强杀、被活动监视器结束），那时候没有任何人来交回这把锁，
+	// 巡检只挂在 New 那一次抢锁上的话，这台机器到下次开机为止都不会再自动重启，
+	// 而界面上「崩了会自动重启」那句话还写着。
 	first.Close()
-	third := New()
-	defer third.Close()
-	if !third.OwnsRestarts() {
-		t.Error("前一个交回之后还是拿不到")
+	if !waitOwns(t, second) {
+		t.Error("前一个退出之后，还在跑的那个面板一直没接过去")
+	}
+}
+
+// TestSecondPanelDoesNotClobberLedger 钉着没拿到独占权的窗口不写记账文件。
+//
+// 它手里那份多半是空的（没巡检就没记过账），照写一遍等于把别人的账本抹掉——
+// 另一个窗口的额度会凭空回来，而这正是「救过几次」这个数唯一要防的事。
+func TestSecondPanelDoesNotClobberLedger(t *testing.T) {
+	t.Setenv("PIER_HOME", t.TempDir())
+
+	first := New()
+	defer first.Close()
+	if !first.OwnsRestarts() {
+		t.Fatal("第一个面板没拿到独占权")
+	}
+	first.mu.Lock()
+	first.restarts["alpha"] = []time.Time{time.Now()}
+	first.persistRestartsLocked()
+	first.mu.Unlock()
+
+	second := New()
+	defer second.Close()
+	if second.OwnsRestarts() {
+		t.Fatal("第二个面板不该拿到独占权")
+	}
+	// 用户在这个窗口里自己动了一次手——它照样要清自己手里那份记账，
+	// 但落盘那一步必须跳过。
+	second.mu.Lock()
+	second.clearRestartsLocked("alpha")
+	second.mu.Unlock()
+
+	if got := loadRestarts(time.Now()); len(got["alpha"]) != 1 {
+		t.Errorf("没拿到独占权的窗口把账本写坏了：%v", got)
+	}
+}
+
+// TestRestartLedgerSurvivesReopen 钉着「重开一次界面」不会把已经救过几次这笔账抹掉。
+//
+// 这笔账要回答的是「还要不要继续救它」，而重开界面恰好是人碰上崩溃循环时
+// 最自然的动作。只记在内存里的话，每重开一次额度就回满，一个永远起不来的服务
+// 会被无限救下去，日志也跟着被刷满。
+func TestRestartLedgerSurvivesReopen(t *testing.T) {
+	t.Setenv("PIER_HOME", t.TempDir())
+
+	first := New()
+	if !first.OwnsRestarts() {
+		t.Fatal("第一个面板没拿到独占权")
+	}
+	first.mu.Lock()
+	for i := 0; i < restartLimit; i++ {
+		first.restarts["alpha"] = append(first.restarts["alpha"], time.Now())
+	}
+	first.persistRestartsLocked()
+	first.mu.Unlock()
+	first.Close()
+
+	second := New()
+	defer second.Close()
+	if !second.OwnsRestarts() {
+		t.Fatal("第二个面板没接过去")
+	}
+	// 走 restartNote：界面上显示的就是它，而「到上限了」这件事正是用户
+	// 重开界面想确认的那一句。
+	if got := second.restartNote("alpha"); !strings.Contains(got, "上限") {
+		t.Errorf("重开之后记账 = %q，想要还看得见「已达上限」", got)
 	}
 }
 

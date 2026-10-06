@@ -140,6 +140,9 @@ type Panel struct {
 	// restarts 记着每个服务最近几次自动重启的时刻，用来算额度（见 restartWindow）。
 	// 用户自己动过手（启动、停止、重启）就清掉：那是「我知道了，再来」，
 	// 不该还背着一笔自动重启的账。
+	//
+	// 拿到独占权时从 restarts.json 读回来，记一次就写回去：关掉界面再打开，
+	// 一个还在崩溃循环里的服务不该重新拥有全部额度（见 restarts.go）。
 	restarts map[string][]time.Time
 
 	// restartClaim 是「自动重启这把活归我干」的独占权，拿不到时为 nil。
@@ -152,6 +155,10 @@ type Panel struct {
 	// 锁落在数据目录而不是状态文件旁边：独占权说的是「这台机器上的 Pier 谁来巡检」，
 	// 与这一份清单是哪一个无关，也就不必在每次加载清单时换手。
 	restartClaim *proc.Claim
+
+	// restartLock 是上面那把锁的位置，New 里算一次：每一轮巡检都要去抢它
+	// （持有它的那个窗口退出之后得能接过去），不想到时候再算一遍路径。
+	restartLock string
 
 	// done 在 Close 时关上，巡检据此收工。
 	//
@@ -214,13 +221,14 @@ func New() *Panel {
 	// 进程，编译中的服务那里什么都没有，光看文件会以为它没在跑。
 	p.mgr.SetBusyProbe(p.HasOp)
 	go p.worker()
-	// 巡检只由拿到独占权的那个进程跑，见 restartClaim。
+	// 巡检只由拿到独占权的那个进程跑，见 restartClaim。先抢一次，抢不到也不打紧：
+	// watchRestarts 每轮还会再试——持有它的那个窗口退出之后，这份活得有人接过去。
+	//
 	// 清单目录建不出来时也照样跑：拿不到锁顶多是别的进程在巡检，
 	// 而这里是「连目录都没有」，多半是第一次运行，不会有人跟它抢。
-	if claim, ok, err := proc.TryClaim(restartLockPath()); err == nil && ok {
-		p.restartClaim = claim
-		go p.watchRestarts()
-	}
+	p.restartLock = restartLockPath()
+	p.ensureRestartLock()
+	go p.watchRestarts()
 	return p
 }
 
@@ -240,13 +248,51 @@ func restartLockPath() string {
 func (p *Panel) Close() {
 	p.closeOnce.Do(func() {
 		close(p.done)
-		p.restartClaim.Release()
+		// 摘下来再放：放着的那把锁不该再由这个面板去动，而 ensureRestartLock
+		// 见到 done 已经关上就不会再抢（两件事在同一把锁里，见那里的说明）。
+		p.mu.Lock()
+		claim := p.restartClaim
+		p.restartClaim = nil
+		p.mu.Unlock()
+		claim.Release()
 	})
+}
+
+// ensureRestartLock 保证这把独占权在自己手上：没有就再抢一次，抢到了才算数。
+//
+// 每轮巡检都要问一次，而不是在 New 里抢一次就完：拿到它的那个窗口可能已经退出，
+// 这时这台机器上就没有人巡检了，而界面上「崩了会自动重启」那句话还写着——
+// 用户等着它自己好，它却不会好。
+func (p *Panel) ensureRestartLock() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.restartClaim != nil {
+		return true
+	}
+	select {
+	case <-p.done:
+		// 面板已经收工，别再抢了：抢到手之后没有人会去放它。
+		return false
+	default:
+	}
+	claim, ok, err := proc.TryClaim(p.restartLock)
+	if err != nil || !ok {
+		return false
+	}
+	p.restartClaim = claim
+	// 接过来的是「这台机器上已经救过它几次」这笔账，不只是那把锁。
+	// 手里这份是空的（没巡检就没记过账），所以直接换上读回来的那份。
+	p.restarts = loadRestarts(time.Now())
+	return true
 }
 
 // OwnsRestarts 报告这台机器上的自动重启是不是归这个面板管。
 // 界面据此说明「崩了会自动重启」这句话此刻算不算数。
-func (p *Panel) OwnsRestarts() bool { return p.restartClaim != nil }
+func (p *Panel) OwnsRestarts() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.restartClaim != nil
+}
 
 // Manager 返回共用的清单编辑业务层，宿主把它接到自己的编辑入口上。
 func (p *Panel) Manager() *manage.Manager { return p.mgr }
@@ -524,6 +570,11 @@ func (p *Panel) watchRestarts() {
 		case <-p.done:
 			return
 		case <-t.C:
+			// 独占权每轮重问一次：持有它的那个窗口退出之后要能接过去。
+			// 抢不到的这一轮什么都不做——另一个窗口正在巡检同一批服务。
+			if !p.ensureRestartLock() {
+				continue
+			}
 			p.recoverCrashed()
 		}
 	}
@@ -594,12 +645,7 @@ func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) string {
 		p.mu.Unlock()
 		return ""
 	}
-	kept := p.restarts[svc.Name][:0]
-	for _, at := range p.restarts[svc.Name] {
-		if now.Sub(at) < restartWindow {
-			kept = append(kept, at)
-		}
-	}
+	kept := keepRecent(p.restarts[svc.Name], now)
 	if len(kept) >= restartLimit {
 		// 额度用光。把记录留着，界面据此说明「它已经自己救过几次、现在不救了」；
 		// 等窗口过去这些时刻会自然过期，额度重新有。
@@ -611,11 +657,34 @@ func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) string {
 	op := newOp("start", "queued")
 	p.ops[svc.Name] = op
 	p.restarts[svc.Name] = append(kept, now)
+	p.persistRestartsLocked()
 	p.mu.Unlock()
 
 	p.jobs <- job{kind: "start", svc: svc, op: op, auto: true}
 	p.fireNotify()
 	return fmt.Sprintf("已自动重启第 %d 次", len(kept)+1)
+}
+
+// clearRestartsLocked 清掉一个服务的记账：用户自己动过手，额度重新算。
+// 调用方必须持有 p.mu。
+func (p *Panel) clearRestartsLocked(name string) {
+	delete(p.restarts, name)
+	p.persistRestartsLocked()
+}
+
+// persistRestartsLocked 把记账写回文件。调用方必须持有 p.mu。
+//
+// 不是自己在巡检的窗口写不得：没拿到独占权就没有账可记，手里这份多半是空的，
+// 照写一遍等于把另一个窗口的账本抹掉（它的额度会凭空回来）。代价只是「我在这个
+// 窗口里手动起过一次」传不过去，而这件事只有另一个窗口在管，本来就轮不到这里说。
+//
+// 写在锁里而不是放锁之后：两次改动之间放开锁，后写的那次会盖掉前一次——
+// 记账是个整体，没有「只写这一条」的做法。
+func (p *Panel) persistRestartsLocked() {
+	if p.restartClaim == nil {
+		return
+	}
+	saveRestarts(p.restarts)
 }
 
 // restartNote 是这个服务此刻该显示的自动重启说明，没有则返回空串。
@@ -796,7 +865,7 @@ func (p *Panel) begin(kind, name string) (*config.Service, *operation, error) {
 	op := newOp(kind, "queued")
 	p.ops[name] = op
 	// 用户自己动过手，自动重启的额度重新算（见 restarts）。
-	delete(p.restarts, name)
+	p.clearRestartsLocked(name)
 	return svc, op, nil
 }
 
@@ -840,7 +909,7 @@ func (p *Panel) enqueueSet(kind string, svcs []*config.Service) (string, error) 
 		}
 		op := newOp(kind, "queued")
 		p.ops[svc.Name] = op
-		delete(p.restarts, svc.Name)
+		p.clearRestartsLocked(svc.Name)
 		targets = append(targets, job{kind: kind, svc: svc, op: op})
 	}
 	p.mu.Unlock()
