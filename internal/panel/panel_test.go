@@ -368,6 +368,7 @@ func TestRefusesEverythingWithoutConfig(t *testing.T) {
 		run  func() error
 	}{
 		{"启动", func() error { _, err := p.Start("alpha"); return err }},
+		{"换端口启动", func() error { _, err := p.StartOnPort("alpha", 0); return err }},
 		{"停止", func() error { _, err := p.Stop("alpha"); return err }},
 		{"重启", func() error { _, err := p.Restart("alpha"); return err }},
 		{"全部启动", func() error { _, err := p.StartAll(); return err }},

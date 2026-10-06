@@ -76,6 +76,13 @@ process group.
   pointing somewhere wrong.
 - Picking a port shows the free ones and the occupied ones side by side — whether a port is taken
   is only knowable at start time, so both lists need to be visible while choosing.
+- When something else already holds the port in the manifest, you can **swap it for this run only**:
+  "start on another port" in the service row's ⋯ menu, or `pier up api --port 0` on the command line
+  (0 picks a free one, or name a port). The swap lasts for that run and is never written back to the
+  manifest — the UI keeps saying "the manifest says 8080, this run uses 8081" and the log header
+  records the port actually used. Once the process holding the original port is gone, the next start
+  goes back to the number in the manifest; while it is still there, a restart keeps the swapped port
+  rather than running into the occupied one again — otherwise the swap would be worth nothing.
 
 ### Local HTTP API
 
@@ -294,7 +301,7 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier doctor` | Check that each language toolchain resolves, and report which one was chosen and why |
 | `pier detect [dir]` | Scan a directory, identify project types and suggest start commands |
 | `pier import [dir]` | Read `.idea` run configurations and convert them into Pier services |
-| `pier up [service...]` | Start services (all of them when no name is given) |
+| `pier up [service...]` | Start services (all of them when no name is given); `--port 0` starts the named one on another port, this run only |
 | `pier down [service...]` | Stop services |
 | `pier restart [service...]` | Restart services |
 | `pier wait <service...>` | Wait until those services are ready (`--timeout 30s`, default 180s) |
@@ -331,7 +338,8 @@ so `pier status --json | jq` always works.
 | 10 | `pier update --check` only: a newer release exists |
 
 For `pier up`, 0 means **every service in the manifest is running**: services skipped because
-their port was taken do not count as success and are listed in their own section at the end.
+their port was taken do not count as success and are listed in their own section at the end
+(add `--port 0` for that service to start it on a free port instead).
 `pier down` is the one exception — "not started by Pier" and "already exited" are notices with
 exit code 0, since running `down` twice is supposed to be safe. `pier doctor` always exits 0:
 a missing toolchain only affects the services that need it, so a script that wants to judge

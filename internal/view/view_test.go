@@ -144,6 +144,80 @@ func TestPortPIDUptimeText(t *testing.T) {
 	}
 }
 
+// 换过端口起的那一次：显示的是实际在听的那个数，另有一句话解释它为什么和清单对不上。
+//
+// 这一组是「界面上写着 A、跑起来是 B」最容易发生的地方——端口那一列和清单里的值
+// 不一样，而用户手上只有这一屏能核对。
+func TestPortTextUsesTheRunningPort(t *testing.T) {
+	// 清单里写 8080，这次起在 8081 上（清单里那个被别人的进程占着）。
+	swapped := running(func(s *proc.Status) {
+		s.Service.Port = 8080
+		s.Service.Health = "http://localhost:8080/health"
+		s.Port = 8081
+		s.PortOpen = true
+	})
+	if got, want := PortText(swapped), "8081 ✓"; got != want {
+		t.Errorf("PortText = %q，想要 %q——显示的是这次实际在听的那个端口", got, want)
+	}
+	if got, want := PortNote(swapped), "清单里写的是 8080，这次用的是 8081"; got != want {
+		t.Errorf("PortNote = %q，想要 %q", got, want)
+	}
+	// 说明位要给这句话，而不是健康地址：端口那一列的数字与清单对不上，
+	// 这一句是唯一解释它的地方。
+	if got := NoteText(swapped); got != PortNote(swapped) {
+		t.Errorf("NoteText = %q，想要端口那句 %q", got, PortNote(swapped))
+	}
+	// 探针地址里的端口也跟着换了：不换就会去探旧端口上那个陌生进程。
+	if got, want := swapped.RunHealth(), "http://localhost:8081/health"; got != want {
+		t.Errorf("RunHealth = %q，想要 %q", got, want)
+	}
+
+	// 没换过就一个字都不多说。
+	same := running(func(s *proc.Status) { s.Service.Port = 8080; s.Port = 8080; s.PortOpen = true })
+	if got := PortNote(same); got != "" {
+		t.Errorf("端口没换过时不该有那句话，实际 %q", got)
+	}
+	// 记录里没写端口（命令行面板在真实状态回来之前先按配置铺的行）时，
+	// 退回清单里那个值，也不该冒出那句解释。
+	noEntry := running(func(s *proc.Status) { s.Service.Port = 8080; s.PortOpen = true })
+	if got := PortNote(noEntry); got != "" {
+		t.Errorf("记录里没有端口时不该有那句话，实际 %q", got)
+	}
+	if got, want := PortText(noEntry), "8080 ✓"; got != want {
+		t.Errorf("PortText = %q，想要 %q", got, want)
+	}
+
+	// 停掉之后（记录还在、进程已不在）：端口那一列留着上次那个数，
+	// 说明位说的是记录待清理——两句话不能抢同一个位置。
+	stale := proc.Status{Service: &config.Service{Name: "alpha", Port: 8080}, Port: 8081, Stale: true}
+	if got, want := PortText(stale), "8081"; got != want {
+		t.Errorf("PortText = %q，想要 %q", got, want)
+	}
+	if got, want := NoteText(stale), "进程已不在，记录待清理"; got != want {
+		t.Errorf("NoteText = %q，想要 %q", got, want)
+	}
+}
+
+// RunPort 是「有记录就用记录里的，没有就用清单里的」那一条判断，界面与命令行
+// 都靠它兜底——手工搭出来的 Status 里只有清单那个端口。
+func TestRunPortFallsBackToManifest(t *testing.T) {
+	cases := []struct {
+		name string
+		st   proc.Status
+		want int
+	}{
+		{"记录里有端口", proc.Status{Service: &config.Service{Port: 8080}, Port: 8081}, 8081},
+		{"记录里没端口", proc.Status{Service: &config.Service{Port: 8080}}, 8080},
+		{"没有服务", proc.Status{Port: 8081}, 8081},
+		{"什么都没有", proc.Status{}, 0},
+	}
+	for _, c := range cases {
+		if got := c.st.RunPort(); got != c.want {
+			t.Errorf("%s：RunPort = %d，想要 %d", c.name, got, c.want)
+		}
+	}
+}
+
 func TestBytes(t *testing.T) {
 	cases := []struct {
 		in   int64

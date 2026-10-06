@@ -621,7 +621,10 @@ func (p *Panel) recoverCrashed() {
 		// 那之后读到的「最后一次运行」就是这一次空白的新运行了（见 proc.TrimToLastRun），
 		// 而要说的是它为什么没的那一次。
 		hit, hasHit := diag.FromLog(cfg, svc.Name)
-		note := p.enqueueRestart(svc, now)
+		// 端口接着上一次那个：它当初让路出来是因为清单里那个被占着，而那次占用
+		// 不会因为这次崩溃就走了——回到清单里那个只会在同一个地方再撞一次，
+		// 白白烧掉一次重启额度。resumePort 会确认那个端口是否还占着。
+		note := p.enqueueRestart(svc, p.resumePort(svc.Name), now)
 		if note == "" {
 			// 身上已经有动作在跑了——用户正动它，或者上一次自动重启还没完。
 			// 这一次不说什么，等它自己有个结果。
@@ -636,9 +639,11 @@ func (p *Panel) recoverCrashed() {
 // 返回空串表示这次什么都没排（身上已经有动作了），调用方据此决定要不要说话。
 // 「重启到上限」也算排上了——那句话正是不该被吞掉的那一条。
 //
+// port 见 resumePort。
+//
 // 记账与占位在同一把锁里完成，不能拆成「先看看有没有额度、再调 Start」：
 // 两次加锁之间隔着一个 tick 的话，一个每秒都崩的服务会被同一秒里的两次轮询各排一次。
-func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) string {
+func (p *Panel) enqueueRestart(svc *config.Service, port int, now time.Time) string {
 	p.mu.Lock()
 	if op := p.ops[svc.Name]; op != nil && op.phase != "error" {
 		// 身上已经有动作了——上一次自动重启还在跑，或者用户正动它。
@@ -660,7 +665,7 @@ func (p *Panel) enqueueRestart(svc *config.Service, now time.Time) string {
 	p.persistRestartsLocked()
 	p.mu.Unlock()
 
-	p.jobs <- job{kind: "start", svc: svc, op: op, auto: true}
+	p.jobs <- job{kind: "start", svc: withPort(svc, port), op: op, auto: true}
 	p.fireNotify()
 	return fmt.Sprintf("已自动重启第 %d 次", len(kept)+1)
 }
@@ -746,6 +751,12 @@ func (p *Panel) stopOne(svc *config.Service) error {
 	default:
 		return err
 	}
+}
+
+// withPort 就是 config.WithPort，这里只留一个短名字：它在下面出现得频繁，
+// 而「换端口的那一次」这件事在面板里到处都要用同一份实现。
+func withPort(svc *config.Service, port int) *config.Service {
+	return config.WithPort(svc, port)
 }
 
 // startOne 启动服务。Start 返回时进程已经拉起，但编译型服务还要初始化，
@@ -871,11 +882,20 @@ func (p *Panel) begin(kind, name string) (*config.Service, *operation, error) {
 
 // enqueue 把一个动作排进队列。
 func (p *Panel) enqueue(kind, name string) (string, error) {
+	return p.enqueuePort(kind, name, 0)
+}
+
+// enqueuePort 与 enqueue 相同，但名下的服务换到 port 上起（port 为 0 就用清单里的）。
+//
+// 换好的那份副本直接当任务的服务：往后的每一步——PORT 注入、${PORT} 展开、
+// 端口占用检查、起不来时那句话里的端口号、写进状态记录的端口——拿到的都已经是
+// 换过之后的值，不必逐个改过去（漏掉任何一处的表现都是「界面上写着 A、跑起来是 B」）。
+func (p *Panel) enqueuePort(kind, name string, port int) (string, error) {
 	svc, op, err := p.begin(kind, name)
 	if err != nil {
 		return "", err
 	}
-	p.jobs <- job{kind: kind, svc: svc, op: op}
+	p.jobs <- job{kind: kind, svc: withPort(svc, port), op: op}
 	p.fireNotify()
 	return "", nil
 }
@@ -899,6 +919,12 @@ func (p *Panel) order(cfg *config.Config, kind string) []*config.Service {
 
 // enqueueSet 把给定的这批服务排队，顺序就用传进来的顺序。
 func (p *Panel) enqueueSet(kind string, svcs []*config.Service) (string, error) {
+	return p.enqueueSetAt(kind, svcs, "", 0)
+}
+
+// enqueueSetAt 与 enqueueSet 相同，但把名为 target 的那一个换到 port 上起。
+// 只对 target 生效：让路是这一个服务的事，前置照旧用它们各自配的端口。
+func (p *Panel) enqueueSetAt(kind string, svcs []*config.Service, target string, port int) (string, error) {
 	p.mu.Lock()
 	// 先把能排的都标记上再统一入队：标记与入队在同一把锁里完成，
 	// 中间不会插进另一个请求把同一个服务排两遍。
@@ -906,6 +932,9 @@ func (p *Panel) enqueueSet(kind string, svcs []*config.Service) (string, error) 
 	for _, svc := range svcs {
 		if op := p.ops[svc.Name]; op != nil && op.phase != "error" {
 			continue
+		}
+		if svc.Name == target {
+			svc = withPort(svc, port)
 		}
 		op := newOp(kind, "queued")
 		p.ops[svc.Name] = op
@@ -950,6 +979,50 @@ func (p *Panel) ResetToolchains() {
 // 而一个跑着的服务身上没有动作。前置正卡在别的动作里时也略过，
 // 不会因为它没就绪就把这次启动整个拒掉——顺序是约定，不是准入条件。
 func (p *Panel) Start(name string) (string, error) {
+	return p.startOnPort(name, 0)
+}
+
+// StartOnPort 换一个端口启动服务，port 传 0 表示自己挑一个空闲的。
+//
+// 为「清单里写的那个端口此刻被别的进程占着」而设：占着它的常常是用户动不得的
+// 东西（另一个项目、他打不开的某个服务），而清单里那个端口又改不得——改一次就
+// 写进清单了。换的端口只对这一次运行有效，那阵占用过去之后，下次启动自然回到
+// 清单里写的值上。
+//
+// 清单里没写端口的服务换不了：没有「换掉哪一个」可言，这时该做的是先在表单里
+// 给它填一个端口。
+func (p *Panel) StartOnPort(name string, port int) (string, error) {
+	cfg := p.Config()
+	if cfg == nil {
+		return "", manage.ErrNoConfig
+	}
+	svc, err := cfg.Find(name)
+	if err != nil {
+		return "", err
+	}
+	if svc.Port <= 0 {
+		return "", fmt.Errorf("%s 没有配端口，没有可换的——先在表单里给它填一个端口", name)
+	}
+	if port <= 0 {
+		// 从清单里那个端口往后找：就近取一个，比从 1024 起扫更像人挑的。
+		port = proc.FreePort(svc.Port+1, usedPortSet(cfg))
+		if port <= 0 {
+			return "", errors.New("没找到空闲端口，先关掉一些服务再试")
+		}
+	}
+	if port == svc.Port {
+		return "", fmt.Errorf("换的端口还是清单里那个（%d），不必换", port)
+	}
+	// 现场再验一次：上面挑出来的端口与用户手填的那个都可能是刚被占掉的，
+	// 那时候要在点下去的这一刻说清楚，而不是排完队、等编译都跑完了才失败。
+	if proc.PortOpen(port) {
+		return "", fmt.Errorf("端口 %d 已经被占用，换一个再试", port)
+	}
+	return p.startOnPort(name, port)
+}
+
+// startOnPort 是 Start 与 StartOnPort 的共同实现，port 为 0 就是用清单里的端口。
+func (p *Panel) startOnPort(name string, port int) (string, error) {
 	cfg := p.Config()
 	if cfg == nil {
 		return "", manage.ErrNoConfig
@@ -959,7 +1032,7 @@ func (p *Panel) Start(name string) (string, error) {
 		return "", err
 	}
 	if len(svc.DependsOn) == 0 {
-		return p.enqueue("start", name)
+		return p.enqueuePort("start", name, port)
 	}
 	want := dependencyClosure(cfg, name)
 	var targets []*config.Service
@@ -973,7 +1046,7 @@ func (p *Panel) Start(name string) (string, error) {
 			deps = append(deps, s.Name)
 		}
 	}
-	msg, err := p.enqueueSet("start", targets)
+	msg, err := p.enqueueSetAt("start", targets, name, port)
 	if err != nil {
 		return "", err
 	}
@@ -982,6 +1055,15 @@ func (p *Panel) Start(name string) (string, error) {
 		return fmt.Sprintf("已把 %s 排入队列（前置 %s 正在操作中，本次未重排）", name, joinNames(deps)), nil
 	}
 	return fmt.Sprintf("已把 %s 及其前置 %s 排入队列，按顺序执行", name, joinNames(deps)), nil
+}
+
+// usedPortSet 把清单里写掉的端口整理成查表用的集合（FreePort 要的形状）。
+func usedPortSet(cfg *config.Config) map[int]bool {
+	out := map[int]bool{}
+	for _, p := range cfg.UsedPorts() {
+		out[p] = true
+	}
+	return out
 }
 
 // dependencyClosure 返回 name 以及顺着 depends_on 一路能走到的全部名字。
@@ -1056,7 +1138,33 @@ func (p *Panel) Stop(name string) (string, error) {
 }
 
 // Restart 排队重启一个服务。
-func (p *Panel) Restart(name string) (string, error) { return p.enqueue("restart", name) }
+//
+// 上一次是在别的端口上跑的（那次从清单里那个端口让过路）就接着在那个端口上跑，
+// 见 resumePort。
+func (p *Panel) Restart(name string) (string, error) {
+	return p.enqueuePort("restart", name, p.resumePort(name))
+}
+
+// resumePort 取出重启时该用的端口，0 表示回清单里写的那个。
+//
+// 判定本身在 proc.ResumePort：命令行上的 pier restart 面对的是同一件事，
+// 两处各写一份迟早会一处接着让路、一处打回清单，同一个动作在界面与命令行里
+// 得到不同结果是最难解释的一类。这里只负责把它要用的一份一份端过去。
+func (p *Panel) resumePort(name string) int {
+	cfg := p.Config()
+	if cfg == nil {
+		return 0
+	}
+	svc, err := cfg.Find(name)
+	if err != nil {
+		return 0
+	}
+	state, err := proc.LoadState(cfg.StatePath())
+	if err != nil {
+		return 0
+	}
+	return proc.ResumePort(svc, state)
+}
 
 // StartAll 排队启动清单里的全部服务。
 func (p *Panel) StartAll() (string, error) { return p.enqueueAll("start") }
@@ -1147,12 +1255,20 @@ func (p *Panel) ServiceLogPath(name string) (string, error) {
 
 // HealthURL 返回服务的健康检查地址，没配则报错。
 func (p *Panel) HealthURL(name string) (string, error) {
-	svc, _, err := p.Lookup(name)
+	svc, cfg, err := p.Lookup(name)
 	if err != nil {
 		return "", err
 	}
 	if svc.Health == "" {
 		return "", fmt.Errorf("%s 没有配置健康检查地址", name)
+	}
+	// 换过端口起的那一次，清单里那个地址指的已经不是这个服务了——它指的那个端口上
+	// 站着的，往往正是当初把这次运行挤开的那个进程。要打开的是此刻真在跑的那一份。
+	// 只在进程确实活着时换：记录还在、进程已不在的那种，换过去只会打开一个死地址，
+	// 那和清单里的地址一样打不开，却更难解释。
+	if state, err := proc.LoadState(cfg.StatePath()); err == nil &&
+		proc.EntryAlive(state.Services[svc.Name]) {
+		svc = proc.RunningService(svc, state)
 	}
 	return svc.Health, nil
 }

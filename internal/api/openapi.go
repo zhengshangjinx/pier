@@ -219,6 +219,8 @@ const openAPISpec = `{
           "kind": { "type": "string", "description": "服务类型：go / java / node / python / shell，空表示按目录内容自动识别。" },
           "dir": { "type": "string", "description": "服务工作目录的绝对路径。" },
           "port": { "type": "integer", "description": "清单里写的端口，0 表示没写。" },
+          "runPort": { "type": "integer", "description": "这次运行实际用的端口，没在跑或没配端口时为 0。绝大多数时候与 port 相同，只有「换一个端口起」那一次不一样。" },
+          "portNote": { "type": "string", "description": "解释 runPort 为什么和 port 对不上，两者一致时为空。" },
           "group": { "type": "string", "description": "分组名，空归入「未分组」。" },
           "statusKey": {
             "type": "string",

@@ -22,6 +22,8 @@
     start: window.pierStart,
     stop: window.pierStop,
     restart: window.pierRestart,
+    // 换一个端口起：这次启动改用一个空闲端口，清单不动（见 panel.StartOnPort）
+    startOnPort: window.pierStartOnPort,
     startAll: window.pierStartAll,
     stopAll: window.pierStopAll,
     logs: window.pierLogs,
@@ -315,6 +317,10 @@
           statusKey: "running", statusText: "运行中", pid: 51007, uptime: "3m12s",
           running: true, portOpen: true, hasHealth: true, healthy: true,
           health: "http://localhost:47822/actuator/health",
+          // 这一条同时演「换一个端口起」：清单里写的是 47822，这次起在 47824 上。
+          // 端口那一列显示的是 47824（runPort），第二行那句说明它为什么和清单对不上。
+          // health 照旧留着清单里那个——它是清单的一部分，编辑表单预填的就是它。
+          runPort: 47824, portNote: "清单里写的是 47822，这次用的是 47824",
           // 这一条演示「项目要的版本本机没有」：圆点后面会多出一个警示标记。
           runtimes: [DEMO_JAVA_OLD, DEMO_MAVEN],
           userNote: "本地调试用，数据库指向 dev 库",
@@ -372,7 +378,10 @@
         dir: "/Users/you/workspace/demo-web", dirShort: "~/workspace/demo-web",
         service: "", managed: false, known: "demo-web",
         origin: { kind: "terminal", label: "iTerm", chain: ["npm", "iTerm"] } },
-      { port: 47822, pid: 51007, command: "java", user: "you",
+      // 这一条是「换一个端口起」的结果：清单里给它写的是 47822，此刻听着的是 47824
+      // （见 demoState 里 shop-app 的 runPort）。行上认的还是 Pier 自己起的这个服务，
+      // 归属与「在不在跑」都按进程组算，跟端口号没关系。
+      { port: 47824, pid: 51007, command: "java", user: "you",
         dir: "/Users/you/workspace/shop/shop-app", dirShort: "~/workspace/shop/shop-app",
         service: "shop-app", managed: true, known: "",
         origin: { kind: "panel", label: "Pier 面板", chain: ["Pier 面板"] } },
@@ -404,9 +413,14 @@
   // 里正听着端口的那几个（含 47813、47823 这两个别人占着的），多一个 47840：
   // 它是「清单里没有、正被占着」那一条，在这一屏里正好该出现在已占用的名单上。
   //
+  // 47824 是 shop-app 这次真正在听的那个（见 demoState 里的 runPort）：清单里写的
+  // 47822 因此落回 used——「清单里写掉了、此刻没人听」，正是换过端口那一行的样子。
+  // 这三份名单里任何一份漏改，这一屏就会指着 47822 说「有人听着」，而后端的
+  // 扫描结果里根本没有它。
+  //
   // 停法也照后端：凑够 48 个可用的就收工，所以 scanTo 是最后一个真看过的号，
   // 不是「本来打算看到哪儿」——那个上界会让界面说出一段没查过的范围。
-  var DEMO_TAKEN = [47811, 47812, 47813, 47822, 47823, 47831, 47840];
+  var DEMO_TAKEN = [47811, 47812, 47813, 47823, 47824, 47831, 47840];
 
   function demoPortCandidates() {
     var used = DEMO_EXISTING.filter(function (p) { return DEMO_TAKEN.indexOf(p) < 0; });
@@ -602,6 +616,11 @@
       case "renameGroup": return { ok: true, msg: "已把分组「" + args[0] + "」改名为「" + args[1] + "」" };
       case "deleteGroup": return { ok: true, msg: "已删除分组「" + args[0] + "」" };
       case "killPortOwner": return { ok: true, msg: "已结束 PID " + args[1] + "，端口现已空出" };
+      // 真后端这时回的是入队那句（没有前置时甚至是空串），端口由它自己挑。
+      // 演示模式不挑，但也不能静悄悄什么都不说——这一颗按钮点下去有没有反应，
+      // 正是截图时要看的东西之一。
+      case "startOnPort": return { ok: true,
+        msg: "已把 " + args[0] + " 排入队列，这次换一个空闲端口起" };
       case "saveService": return { ok: true, msg: "已保存（演示模式，没有真的写文件）" };
       case "deleteService": return { ok: true, msg: "已处理（演示模式）" };
       // name 单独给：界面拿它把表单开在新复制出来的那一条上。
@@ -761,6 +780,10 @@
   var IconGear = function (p) { return html`<${Ico} ...${p}><path d="M14.5 8l-2.25 1.76.28 2.83-2.77-.33L8 14.5l-1.76-2.24-2.77.33.28-2.83L1.5 8l2.25-1.76-.28-2.83 2.77.33L8 1.5l1.76 2.24 2.77-.33-.28 2.83z"/><circle cx="8" cy="8" r="2.2"/><//>`; };
   var IconDownload = function (p) { return html`<${Ico} ...${p}><path d="M8 2.2v7.4"/><path d="M4.9 6.8L8 9.9l3.1-3.1"/><path d="M2.6 11.2v1.7a1.5 1.5 0 0 0 1.5 1.5h7.8a1.5 1.5 0 0 0 1.5-1.5v-1.7"/><//>`; };
   var IconCheck = function (p) { return html`<${Ico} ...${p}><path d="M3 8.4l3.3 3.3L13 4.6"/><//>`; };
+  // 「换一个端口起」那两颗（服务行的「⋯」里，以及端口占用弹窗的按钮上）：
+  // 两条反方向的箭头，说的是「把这一样东西换成另一样」，不是「刷新」——
+  // 刷新那颗是圆箭头的 IconRefresh，两颗摆在一起时不能长得像。
+  var IconSwap = function (p) { return html`<${Ico} ...${p}><path d="M3 5.4h9.2"/><path d="M9.9 3.1l2.3 2.3-2.3 2.3"/><path d="M13 10.6H3.8"/><path d="M6.1 8.3L3.8 10.6l2.3 2.3"/><//>`; };
 
   // 品牌标记：和应用图标（tools/mkicon）同一套几何，改动时两处一起对。
   //
@@ -1377,6 +1400,14 @@
     if (s.pid > 0) ids.push("PID " + s.pid);
     if (hasVal(s.uptime)) ids.push("运行 " + s.uptime);
 
+    // 端口那一列写的是**这次运行实际用的**那个（runPort），不是清单里写的：
+    // 「换一个端口起」起的那一次，两个值不一样，而这一列要说的是「它此刻听在哪儿」。
+    // 两者不一致时后端另给一句 portNote（见 view.PortNote），摆在下面那行说明里。
+    //
+    // runPort 取不到时退回清单里的值：命令行面板在真实状态回来之前先按配置铺的
+    // 那几行只有 port 一项，界面里手工构造的演示数据也一样。
+    var port = isNum(s.runPort) && s.runPort > 0 ? s.runPort : s.port;
+
     // 资源占用只对在跑的服务有意义，而且只跟在后端报「运行中」时取。
     //
     // 数字为 0 也照常显示，不做「0 就省略」：省略之后，一个空闲的服务和
@@ -1434,12 +1465,19 @@
       var holder = s.occupant.service || s.occupant.command;
       bits.push({ t: "被 " + [holder, "PID " + s.occupant.pid].filter(Boolean).join(" · ") + " 占用" });
     }
+    // 换过端口起的那一次，端口那一列显示的数字和清单里对不上，这一句是唯一的解释。
+    // 它单列一条、排在其他说明前面，因为端口那一列只能靠它把话说圆；
+    // 而下面那句 note 在后端本来就常常就是同一句话（见 view.NoteText），
+    // 所以它已经说过一次之后就不再重复——同一件事在一行里说两遍，读起来像卡了两下。
+    if (hasVal(s.portNote)) bits.push({ t: s.portNote });
     // 自动重启过就要说出来。一个崩了又被拉起来的服务，在界面上和「一直好好跑着」
     // 长得一模一样，而这两件事要看的程度差得远；到顶之后「不救了」更是只能从
     // 这一句里看出来。措辞由后端的 restartNote 给，这里不另写一份。
     if (hasVal(s.restartNote)) bits.push({ t: s.restartNote, warn: true });
     if (hasVal(s.userNote)) bits.push({ t: s.userNote });
-    else if (hasVal(s.note) && !waitingHealth) bits.push({ t: s.note, warn: !!s.probeExpired });
+    else if (hasVal(s.note) && !waitingHealth && !hasVal(s.portNote)) {
+      bits.push({ t: s.note, warn: !!s.probeExpired });
+    }
 
     var menu = {
       items: [
@@ -1448,6 +1486,12 @@
         // 不带这条服务的运行状态、也不写盘，只把清单里的定义抄成一段 YAML，
         // 所以谁都能点：只读清单下「复制出去贴到别处」正是它唯一的用处。
         { key: "yaml", label: "复制成 YAML", icon: e(IconDoc) },
+        // 清单里那个端口被别人的进程占着时，出路不只有「清掉占着的那个」，
+        // 还有「绕开它」：换一个空闲端口起这一次，清单一个字都不动。
+        // 只在没跑的时候给：换端口要先停下来，那一步（停哪个、停多久）由用户自己做主；
+        // 没配端口的服务不给——没有「换掉哪一个」可言。
+        s.port > 0 && !live
+          ? { key: "startOnPort", label: "换一个端口起", icon: e(IconSwap), disabled: busy } : null,
         s.hasHealth ? { key: "health", label: "打开健康检查地址", icon: e(IconHeart) } : null,
         // 探针没过的时候，最该做的动作是「地址写错了」或者「这个服务没有健康
         // 接口」——两种都不该改服务本身，关掉探针就好。摆在最显眼的位置，
@@ -1524,7 +1568,7 @@
               title=${b.t} style=${b.warn ? { color: token.colorWarning } : null}>${b.t}</span>`; })}
           </div>
           <div className="dc-row-inline" style=${sub}>
-            ${[s.port > 0 ? ":" + s.port : ""].concat(ids, usage ? [usage] : [])
+            ${[port > 0 ? ":" + port : ""].concat(ids, usage ? [usage] : [])
               .filter(Boolean).join(" · ")}
           </div>
           ${"" /* 失败原因后面那串「详见 /…/xxx.log」换成一个能点的「查看日志」：
@@ -1548,7 +1592,7 @@
 
       <div className="dc-row-meta">
         <div className="dc-row-ids">
-          ${s.port > 0 ? html`<span className="dc-mono dc-port">:${s.port}</span>`
+          ${port > 0 ? html`<span className="dc-mono dc-port" title=${s.portNote || null}>:${port}</span>`
             : html`<span style=${{ color: token.colorTextQuaternary }}>无端口</span>`}
           ${ids.length ? html`<span style=${sub}>${ids.join(" · ")}</span>` : null}
         </div>
@@ -1620,8 +1664,21 @@
       }
     };
 
+    // 占着端口的那个进程动不得时（另一个项目、同事的调试会话、系统服务），
+    // 出路不是结束它，而是让这个服务换一个端口起。这一颗就摆在「结束进程」旁边，
+    // 因为这两种选择本来就是并排的：一个清掉占着的，一个绕开它。
+    //
+    // 占着的正是这个服务自己的进程时不给这一颗：那说明它其实在跑（记录丢了之类），
+    // 该做的是停止，换端口起照样会撞在这个端口上。
+    var canSwap = owner && !broken && isNum(poData.port) && poData.port > 0
+      && owner.service !== name;
+
     var footer = [html`<${A.Button} key="c" onClick=${onClose}>关闭<//>`];
     if (owner && !broken) {
+      if (canSwap) {
+        footer.push(html`<${A.Button} key="p" icon=${e(IconSwap)}
+          onClick=${function () { onClose(); props.onSwap(name); }}>换一个端口起<//>`);
+      }
       if (owner.managed) {
         footer.push(html`<${A.Button} key="s" type="primary" danger
           onClick=${function () { onClose(); props.onStopService(owner.service); }}>
@@ -3768,7 +3825,13 @@
         return;
       }
       try {
-        var r = await call(kind, svc.name);
+        // 「换一个端口起」比别的动作多带一个参数：端口传 0，由后端挑一个空闲的。
+        // 挑中的是哪一个只有一处判断（internal/proc 的 FreePort），挑到之后写进
+        // 运行记录，界面上那一列从 runPort 读回来——不在这里挑，也就不必在两处
+        // 各写一份「什么叫空闲」。
+        var r = kind === "startOnPort"
+          ? await call(kind, svc.name, 0)
+          : await call(kind, svc.name);
         if (r.msg) flash("ok", r.msg);
       } catch (ex) {
         flash("err", ex.message);
@@ -4682,6 +4745,7 @@
         message=${msg.message}
         onDone=${refresh}
         onStopService=${function (n) { setPortOwner({ open: false, name: "" }); act("stop", { name: n }); }}
+        onSwap=${function (n) { setPortOwner({ open: false, name: "" }); act("startOnPort", { name: n }); }}
         onClose=${function () { setPortOwner({ open: false, name: "" }); }}/>
 
       <${PortScanModal} open=${scanOpen} message=${msg.message}

@@ -67,11 +67,16 @@ func cmdWait(args []string) int {
 		svcs = append(svcs, svc)
 	}
 
-	// 「在不在跑」用的是状态里那一条判定（见 proc.RunningNames），不是端口：
+	// 「在不在跑」用的是状态里那一条判定（见 proc.EntryAlive），不是端口：
 	// 端口可能是被别人的进程占着，那跟这个服务就绪与否没有关系。
-	running, err := proc.RunningNames(cfg.StatePath())
+	//
+	// 读整份状态（而不是 RunningNames 那一份名字表），是因为还要拿它把服务换成
+	// 「此刻真正在跑的那一份」：换过端口起的那次，探针地址得跟着落到实际那个端口上，
+	// 否则 wait 探的是旧端口上那个陌生进程——它可能正好回 200，于是这里宣布「已就绪」，
+	// 而就绪的是别人。
+	state, err := proc.LoadState(cfg.StatePath())
 	if err != nil {
-		running = map[string]bool{}
+		state = &proc.State{Services: map[string]*proc.Entry{}}
 	}
 
 	// 两种等不到的不必等满窗口：等下去也不会有结果，而盯着一个不会再变的东西
@@ -85,12 +90,12 @@ func cmdWait(args []string) int {
 			fmt.Printf("  %-14s 没配健康探针，等不到「就绪」这个信号（在清单里给它加 health）\n", svc.Name)
 			missed = append(missed, svc.Name+"（没配探针）")
 			code = 1
-		case !running[svc.Name]:
+		case !proc.EntryAlive(state.Services[svc.Name]):
 			fmt.Printf("  %-14s 没有在运行，先起它：pier up %s\n", svc.Name, svc.Name)
 			missed = append(missed, svc.Name+"（没在跑）")
 			code = 1
 		default:
-			waited = append(waited, svc)
+			waited = append(waited, proc.RunningService(svc, state))
 		}
 	}
 

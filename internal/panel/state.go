@@ -37,10 +37,19 @@ func runtimesOf(sup *proc.Supervisor, svc *config.Service) []proc.ToolInfo {
 
 // ServiceOut 是面板上一个服务的全部展示字段。
 type ServiceOut struct {
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Dir        string `json:"dir"`
-	Port       int    `json:"port"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Dir  string `json:"dir"`
+	// Port 是清单里写的端口，RunPort 是这次运行实际用的那个。
+	//
+	// 两个都给，是因为界面要用它们做两件相反的事：编辑表单预填「清单里写的那个」
+	// （预填成运行时的值，用户一保存就把换过的端口写进清单了，而那次换端口
+	// 本来就只是这一次的事）；显示要的是运行时那个。
+	Port int `json:"port"`
+	// RunPort 是这次运行实际用的端口，没在跑或没配端口时为 0。
+	RunPort int `json:"runPort"`
+	// PortNote 解释 RunPort 为什么和 Port 对不上，两边一样时为空串。
+	PortNote   string `json:"portNote"`
 	Group      string `json:"group"`
 	StatusKey  string `json:"statusKey"`
 	StatusText string `json:"statusText"`
@@ -269,6 +278,8 @@ func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr 
 			Kind:         svc.Kind,
 			Dir:          svc.AbsDir(),
 			Port:         svc.Port,
+			RunPort:      st.RunPort(),
+			PortNote:     view.PortNote(st),
 			Group:        svc.GroupName(),
 			StatusKey:    view.StateKey(st),
 			StatusText:   view.StatusText(st),

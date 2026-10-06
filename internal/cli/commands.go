@@ -71,17 +71,116 @@ func pickServices(cfg *config.Config, names []string) ([]*config.Service, error)
 	return out, nil
 }
 
+// portSwap 是 --port 解析出来的结果。
+type portSwap struct {
+	port  int  // 换到哪个端口，0 表示自己挑一个空闲的
+	given bool // 命令行上给没给 --port
+}
+
+// parsePortFlag 从参数里摘出 --port，返回结果与其余参数。
+//
+// 与 --config 一样先摘出来再交给 pickServices：留着它的话会被当成一个服务名，
+// 报出来的是「找不到服务 --port」，与真正的问题隔着一层。
+func parsePortFlag(args []string) (portSwap, []string, error) {
+	var out portSwap
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		arg := ""
+		switch {
+		case a == "--port":
+			if i+1 >= len(args) {
+				return out, rest, errors.New("--port 后面要跟端口号，0 表示自己挑一个空闲的")
+			}
+			i++
+			arg = args[i]
+		case strings.HasPrefix(a, "--port="):
+			arg = strings.TrimPrefix(a, "--port=")
+		default:
+			rest = append(rest, a)
+			continue
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 0 || n > 65535 {
+			return out, rest, fmt.Errorf("--port 要一个 0 到 65535 之间的端口号，这里是 %q（0 表示自己挑一个空闲的）", arg)
+		}
+		out = portSwap{port: n, given: true}
+	}
+	return out, rest, nil
+}
+
+// swapPort 给出「这一次改用 port 起」的那份服务定义，port 为 0 表示自己挑一个空闲的。
+//
+// 换的端口只对这一次运行有效，不写回清单：占用清单里那个端口的多半是用户动不得的
+// 东西（另一个项目、他打不开的某个服务），而清单该写的是「这个服务平时听哪个端口」，
+// 不该被一次临时的让路改掉。
+func swapPort(svc *config.Service, port int, cfg *config.Config) (*config.Service, error) {
+	if svc.Port <= 0 {
+		return nil, fmt.Errorf("%s 没有配端口，没有可换的——先在清单里给它填一个端口", svc.Name)
+	}
+	if port == 0 {
+		used := map[int]bool{}
+		for _, p := range cfg.UsedPorts() {
+			used[p] = true
+		}
+		// 从清单里那个端口往后找：就近取一个，比从 1024 起扫更像人挑的。
+		port = proc.FreePort(svc.Port+1, used)
+		if port <= 0 {
+			return nil, errors.New("没找到空闲端口，先关掉一些服务再试")
+		}
+	}
+	if port == svc.Port {
+		return nil, fmt.Errorf("换的端口还是清单里那个（%d），不必换", port)
+	}
+	return config.WithPort(svc, port), nil
+}
+
 // cmdUp 启动服务。先全部拉起，再统一等待就绪——否则一个 Java 服务的启动
 // 会把后面所有服务的启动时间串行叠加。单个服务失败不阻断其余服务。
 func cmdUp(args []string) int {
 	cfgPath, rest := extractConfig(args)
+	swap, rest, err := parsePortFlag(rest)
+	if err != nil {
+		return fail("%v", err)
+	}
+	return upServices(cfgPath, rest, swap, nil)
+}
+
+// upServices 是 up 真正做的那件事。resume 是「这几个服务这次接着用哪个端口起」，
+// 只有 restart 会给（它在停之前读出来，见 resumePorts）；up 自己从头开始，
+// 服务该用清单里写的那个端口。
+func upServices(cfgPath string, names []string, swap portSwap, resume map[string]int) int {
 	cfg, sup, err := setup(cfgPath)
 	if err != nil {
 		return fail("%v", err)
 	}
-	targets, err := pickServices(cfg, rest)
+	targets, err := pickServices(cfg, names)
 	if err != nil {
 		return fail("%v", err)
+	}
+	// 让路是「给这一个服务换」，对着一批服务说这句话没有意义，所以只认点名的情形。
+	if swap.given {
+		if len(targets) != 1 {
+			return fail("--port 要指名一个服务，它换的是那一个的端口：pier up api --port 0")
+		}
+		manifest := targets[0].Port
+		swapped, err := swapPort(targets[0], swap.port, cfg)
+		if err != nil {
+			return fail("%v", err)
+		}
+		targets[0] = swapped
+		fmt.Printf("  清单里写的是 %d，这次用的是 %d（只这一次，不写回清单）\n", manifest, swapped.Port)
+	}
+	// 重启时接着上一次让路后的端口起。与上一条说的是同一件事，也照样要说出口：
+	// 界面上一直写着这次实际用的是哪个端口，命令行这边不能只在 up 那一次说。
+	for i, svc := range targets {
+		p, ok := resume[svc.Name]
+		if !ok {
+			continue
+		}
+		targets[i] = config.WithPort(svc, p)
+		fmt.Printf("  %-14s 清单里写的是 %d，这次用的是 %d（那个端口还被占着，接着上次让的路）\n",
+			svc.Name, svc.Port, p)
 	}
 
 	started := make([]*config.Service, 0, len(targets))
@@ -197,14 +296,49 @@ func cmdDown(args []string) int {
 }
 
 // cmdRestart 先停后起。停止阶段的「未启动」不影响后续启动。
+//
+// 上一次是从清单里那个端口让路出来的，这次接着让路后的那个起：点 restart 想要的是
+// 「还是刚才那个服务」，而不是「回到清单里那个正被别人占着的端口上，起不来」。
+// 这件事必须赶在停之前问——停完记录就销了，销完就没人记得上一次用的是哪个端口。
 func cmdRestart(args []string) int {
 	cfgPath, rest := extractConfig(args)
+	resume := resumePorts(cfgPath, rest)
 	if code := cmdDown(append([]string{"--config", cfgPath}, rest...)); code != 0 {
 		// 停止失败通常意味着端口仍被占用，继续启动只会更混乱，直接中止。
 		return code
 	}
 	fmt.Println()
-	return cmdUp(append([]string{"--config", cfgPath}, rest...))
+	return upServices(cfgPath, rest, portSwap{}, resume)
+}
+
+// resumePorts 读出这几个服务这次该接着用哪个端口起，判定见 proc.ResumePort。
+//
+// 读不动（清单加载不起来、状态文件坏了）就当没有：接着要说这件事的是后面的
+// stop 与 start，它们说话时手上有完整的原因；在这里抢着先报一句，用户看到的是一条
+// 没头没尾的错误加上一条说清了原因的错误。
+func resumePorts(cfgPath string, names []string) map[string]int {
+	cfg, err := loadConfig(cfgPath)
+	if err != nil {
+		return nil
+	}
+	state, err := proc.LoadState(cfg.StatePath())
+	if err != nil || len(state.Services) == 0 {
+		return nil
+	}
+	targets, err := pickServices(cfg, names)
+	if err != nil {
+		return nil
+	}
+	out := map[string]int{}
+	for _, svc := range targets {
+		if p := proc.ResumePort(svc, state); p > 0 {
+			out[svc.Name] = p
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // cmdStatus 以表格展示所有服务的状态。

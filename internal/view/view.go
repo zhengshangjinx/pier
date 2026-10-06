@@ -69,17 +69,35 @@ func StatusText(st proc.Status) string {
 const Dash = "-"
 
 // PortText 展示端口号，并附上「是否真的在监听」的提示。
+//
+// 显示的是**这次运行实际用的**那个（st.RunPort()），不是清单里写的那个：
+// 换过端口起的那一次，这两个值不一样，而用户要看的是服务此刻听在哪儿。
 func PortText(st proc.Status) string {
-	if st.Service.Port <= 0 {
+	port := st.RunPort()
+	if port <= 0 {
 		return Dash
 	}
 	if st.Running && st.PortOpen {
-		return fmt.Sprintf("%d ✓", st.Service.Port)
+		return fmt.Sprintf("%d ✓", port)
 	}
 	if st.PortOpen {
-		return fmt.Sprintf("%d (被占)", st.Service.Port)
+		return fmt.Sprintf("%d (被占)", port)
 	}
-	return fmt.Sprintf("%d", st.Service.Port)
+	return fmt.Sprintf("%d", port)
+}
+
+// PortNote 说明这次运行的端口为什么和清单里写的不一样，两边一致时返回空串。
+//
+// 只写在这一个地方：命令行与界面都要说这句话，少说一次，用户看到的就是一个
+// 与清单对不上的数字摆在界面上，没有任何解释。
+func PortNote(st proc.Status) string {
+	if st.Service == nil || st.Service.Port <= 0 {
+		return ""
+	}
+	if run := st.RunPort(); run > 0 && run != st.Service.Port {
+		return fmt.Sprintf("清单里写的是 %d，这次用的是 %d", st.Service.Port, run)
+	}
+	return ""
 }
 
 // PIDText 展示进程号，未运行时为 Dash。
@@ -103,6 +121,11 @@ func NoteText(st proc.Status) string {
 	switch {
 	case st.Stale:
 		return "进程已不在，记录待清理"
+	// 换过端口这一条排在探针前面：端口那一列显示的就是换过之后的数字，和清单对不上，
+	// 这句是唯一解释它的地方。探针那句排在后面是有代价的——这一行被占了，探针就没得说；
+	// 但探针各有各的列写着「未通过」，而端口这一列只能靠这句话把自己说圆。
+	case st.Running && PortNote(st) != "":
+		return PortNote(st)
 	case st.Running && st.HasHealth && !st.Healthy && !st.ProbeExpired:
 		return "尚未通过健康探针"
 	// 服务在跑、探针却一直没过：说清楚是探针这一路没探通，不是服务没起来。
@@ -114,7 +137,8 @@ func NoteText(st proc.Status) string {
 	case st.PortOpen && !st.Running:
 		return "端口被 Pier 之外的进程占用"
 	case st.Running:
-		return st.Service.Health
+		// 用探针那一份的地址：换过端口的话，端口变了地址也跟着变了。
+		return st.RunHealth()
 	default:
 		return ""
 	}

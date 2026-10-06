@@ -118,6 +118,8 @@ func (a *app) bindings() []binding {
 		{"pierStart", a.start},
 		{"pierStop", a.stop},
 		{"pierRestart", a.restart},
+		// 换一个端口起：清单里那个被别的东西占着时，绕开它起这一次
+		{"pierStartOnPort", a.startOnPort},
 		{"pierStartAll", a.startAll},
 		{"pierStopAll", a.stopAll},
 		{"pierLogs", a.logs},
@@ -241,6 +243,14 @@ func (a *app) state() string { return marshal(a.panel.State()) }
 func (a *app) start(name string) string   { return wrap(a.panel.Start(name)) }
 func (a *app) stop(name string) string    { return wrap(a.panel.Stop(name)) }
 func (a *app) restart(name string) string { return wrap(a.panel.Restart(name)) }
+
+// startOnPort 换一个端口启动一个服务，port 传 0 表示自己挑一个空闲的。
+//
+// 为「清单里那个端口被别的东西占着」而设：换的只影响这一次运行，不写回清单。
+// 挑中的端口由后端写进运行记录，界面上那一列读的是 runPort，不是清单里那个。
+func (a *app) startOnPort(name string, port int) string {
+	return wrap(a.panel.StartOnPort(name, port))
+}
 
 func (a *app) startAll() string { return wrap(a.panel.StartAll()) }
 func (a *app) stopAll() string  { return wrap(a.panel.StopAll()) }

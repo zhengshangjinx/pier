@@ -6,10 +6,12 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -279,6 +281,43 @@ func (c *Config) validateServices() error {
 		return fmt.Errorf("服务依赖成环：%s", strings.Join(cycle, " → "))
 	}
 	return nil
+}
+
+// WithPort 返回把端口换成 port 的一份服务副本；port 为 0 或与原来相同则原样返回。
+//
+// 一定得是副本：清单是用户写的，「换一个端口起」只是这一次运行的事，改到清单里
+// 那一份就写回去了——用户下次打开界面会看见端口换掉了，而他从没同意过这件事。
+//
+// 换的不只是 Port 这个数：健康探针地址里的端口也是探测目标，一并跟着换，
+// 否则探针会去探旧端口上那个陌生进程（见 withPortInURL）。
+func WithPort(svc *Service, port int) *Service {
+	if svc == nil || port <= 0 || port == svc.Port {
+		return svc
+	}
+	cp := *svc
+	cp.Health = withPortInURL(cp.Health, svc.Port, port)
+	cp.Port = port
+	return &cp
+}
+
+// withPortInURL 把 URL 里的端口从 old 换成 new，不是这个端口就原样返回。
+//
+// 健康地址大多是从端口推出来的（见 cli/detect.go），里面带着端口是常态。
+// 不跟着换就会去探旧端口上那个陌生进程：它可能正好返回 200，于是界面写着「健康」，
+// 而这句话说的是另一个服务——比探不通更坏。
+//
+// 只认 URL 里那一段端口，不在整串上做替换：路径里出现同一个数字是常事
+// （/api/v2/8080/… 之类），按字符串替换会把它一起改掉。
+func withPortInURL(raw string, old, new int) string {
+	if raw == "" || old <= 0 {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Port() != strconv.Itoa(old) {
+		return raw
+	}
+	u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(new))
+	return u.String()
 }
 
 // healthProblem 检查健康探针地址能不能真的用，返回一句「哪里不对」，没问题时空串。

@@ -144,6 +144,12 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 	}
 	fmt.Fprintf(logFile, "%s %s\n", LogStartMarker(svc.Name), time.Now().Format(time.RFC3339))
 	fmt.Fprintf(logFile, "--- 工作目录：%s\n", svc.AbsDir())
+	// 端口也写在头上。「运行：」那行里写的是 $PORT 这样的字面量，它由 shell 在
+	// 执行时展开；这条服务究竟听在哪个端口上，只有这里说得清。而换过端口起的
+	// 那一次（见 panel.StartOnPort）清单里那个值根本不对，日志是唯一记得住的地方。
+	if svc.Port > 0 {
+		fmt.Fprintf(logFile, "--- 端口：%d\n", svc.Port)
+	}
 
 	// failEarly 把准备阶段的失败同时写进日志并作为返回值，保证「终端提示」与「日志」一致。
 	failEarly := func(err error) error {
@@ -247,6 +253,7 @@ func (s *Supervisor) StartContext(ctx context.Context, svc *config.Service) erro
 		Command:   displayCmd(plan.Run),
 		StartedAt: time.Now(),
 		LogPath:   logPath,
+		Port:      svc.Port,
 		Ident:     processIdent(pid),
 	}
 	// 记状态与拉起进程必须同生共死：状态写不进去，这个进程就成了孤儿——界面看不见
@@ -324,6 +331,15 @@ type Status struct {
 	// 资源用量按进程组求和（见 SampleMetrics），这一项就是把服务和采样结果对上的那把钥匙。
 	PGID   int
 	Uptime time.Duration
+	// Port 是这次运行实际用的端口，取的是运行记录里的那个。
+	//
+	// 绝大多数时候它等于清单里写的值，只有「换一个端口起」启动的那一次不一样。
+	// 不能拿 Service.Port 当替身：清单里那个可能正被占着，而占着的往往就是这条
+	// 记录自己的进程（端口换了、清单没换），照它去探会得出「端口被别人占用」。
+	//
+	// 读它走 RunPort()：手工搭出来的 Status（命令行面板在真实状态回来之前先按
+	// 配置铺的那几行）没有这一项，那时退回清单里的值才是对的。
+	Port int
 	// PortOpen 表示端口已被监听（可能来自 IDEA 或其它终端起的实例）。
 	PortOpen bool
 	// Occupant 是占着该端口的进程，由同一次 lsof 一并带回，不额外开销。
@@ -346,6 +362,29 @@ type Status struct {
 	ProbeExpired bool
 }
 
+// RunPort 返回这次运行实际用的端口：运行记录里有就用记录里的，
+// 没有（还没跑过、或这个 Status 是手工搭出来的）就用清单里写的那个。
+func (st Status) RunPort() int {
+	if st.Port > 0 {
+		return st.Port
+	}
+	if st.Service != nil {
+		return st.Service.Port
+	}
+	return 0
+}
+
+// RunHealth 返回这次运行该探的那个地址：端口换过的话，探针地址也换到同一个端口上。
+//
+// 显示与探测都用它。拿清单里那个原值去探，探的是旧端口上那个陌生进程——
+// 它可能正好返回 200，于是界面上写着「健康」，而那句话说的是另一个服务。
+func (st Status) RunHealth() string {
+	if st.Service == nil {
+		return ""
+	}
+	return config.WithPort(st.Service, st.RunPort()).Health
+}
+
 // Status 汇总所有服务的运行情况，顺序与配置一致。
 func (s *Supervisor) Status() ([]Status, error) {
 	state, err := LoadState(s.cfg.StatePath())
@@ -357,10 +396,15 @@ func (s *Supervisor) Status() ([]Status, error) {
 	listening := ListeningInfo()
 	out := make([]Status, 0, len(s.cfg.Services))
 	for _, svc := range s.cfg.Services {
-		st := Status{Service: svc}
-		if svc.Port > 0 {
+		st := Status{Service: svc, Port: svc.Port}
+		// 记录先取出来：端口归属与「在不在跑」都要看它。
+		e, hasEntry := state.Services[svc.Name]
+		if hasEntry && e != nil && e.Port > 0 {
+			st.Port = e.Port
+		}
+		if st.Port > 0 {
 			if listening != nil {
-				if l, ok := listening[svc.Port]; ok {
+				if l, ok := listening[st.Port]; ok {
 					st.PortOpen = true
 					occ := l
 					// 顺手认一下这是不是自家服务：端口多半握在子进程手里，
@@ -369,10 +413,10 @@ func (s *Supervisor) Status() ([]Status, error) {
 					st.Occupant = &occ
 				}
 			} else {
-				st.PortOpen = PortOpen(svc.Port)
+				st.PortOpen = PortOpen(st.Port)
 			}
 		}
-		if e, ok := state.Services[svc.Name]; ok {
+		if hasEntry {
 			if sameEntry(e) {
 				st.Running = true
 				st.PID = e.PID
@@ -385,7 +429,7 @@ func (s *Supervisor) Status() ([]Status, error) {
 		// 进程在跑不等于服务可用：编译型服务起来后还要初始化，所以额外探一次健康。
 		if svc.Health != "" && st.Running {
 			st.HasHealth = true
-			st.Healthy = ProbeHealth(svc.Health)
+			st.Healthy = ProbeHealth(st.RunHealth())
 			// 超过等待窗口还没通过就不再算「启动中」，见 ProbeExpired 的说明。
 			st.ProbeExpired = !st.Healthy && st.Uptime > HealthWait
 		}

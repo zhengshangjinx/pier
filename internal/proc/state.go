@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/zhengshangjinx/pier/internal/config"
 )
 
 // Entry 是状态文件里一个服务的运行记录。
@@ -21,6 +23,13 @@ type Entry struct {
 	StartedAt time.Time `json:"startedAt"`
 	// LogPath 是本次启动使用的日志文件。
 	LogPath string `json:"logPath"`
+	// Port 是本次运行实际监听的端口。清单里写了多少就是多少；只有一处会不一样：
+	// 界面上那颗「换一个端口起」（panel.StartOnPort），那一次运行用的是换后的值。
+	//
+	// 记在记录里而不是只留在内存里，是为了让「它现在听在哪个端口上」只有一个答案：
+	// 状态、界面、pier status 都从这一份读。清单里那个可能已经被别的进程占着了，
+	// 拿它去探只会得到「端口被占」——而占着的很可能就是这条记录自己。
+	Port int `json:"port,omitempty"`
 	// Ident 是「这个进程还是当初记录的那一个」的辅助凭据，unix 上留空。
 	//
 	// unix 靠 PGID 就够：进程组号等于首进程 PID，PID 被系统复用时组号对不上。
@@ -181,6 +190,47 @@ func RunningNames(path string) (map[string]bool, error) {
 // 与 Status、ManagedName、RunningNames 是同一条判定，不另写一份：
 // 「还是不是当初那个进程」这件事上，多一份实现就是多一个会走样的口径。
 func EntryAlive(e *Entry) bool { return sameEntry(e) }
+
+// RunningService 返回「此刻真正在跑的那一份」服务定义：端口换成这次运行实际用的
+// 那个（见 Entry.Port），其余照旧。没有记录、或记录里没写端口，就原样返回清单里那份。
+//
+// 探针地址里的端口是跟着端口一起换的（config.WithPort），所以拿到它的地方
+// 探的就是这次在跑的那个进程——清单里那个端口上可能正站着别人。
+func RunningService(svc *config.Service, state *State) *config.Service {
+	if svc == nil || state == nil {
+		return svc
+	}
+	e := state.Services[svc.Name]
+	if e == nil || e.Port <= 0 {
+		return svc
+	}
+	return config.WithPort(svc, e.Port)
+}
+
+// ResumePort 决定重启时是接着上一次那个端口跑，还是回到清单里写的那个，
+// 0 表示回清单。界面与命令行走的是同一个判定，两边都得说同一句话。
+//
+// 只有一种情况会用到它：上一次是从清单里那个端口让路出来的（换一个端口起）。
+// 让路的原因是那端口被别人占着——占着就继续用让路后的那个，已经不占了
+// （占用的那个进程走了）就正好回来。拿「现在还被占着吗」来判、而不是照着记录里的值
+// 一直用下去，是为了别把一个临时选择变成永久选择：清单是用户写的，他改了端口、
+// 或者占着的那个人退出了，下一次启动就该回到清单说的那个端口上。
+//
+// 读的是状态文件里那一条：换端口起只对那一次运行有效，除了记录没有别处记得住它。
+// 所以调用方要在停止之前读——停完记录就销了。
+func ResumePort(svc *config.Service, state *State) int {
+	if svc == nil || state == nil || svc.Port <= 0 {
+		return 0
+	}
+	e := state.Services[svc.Name]
+	if e == nil || e.Port <= 0 || e.Port == svc.Port {
+		return 0
+	}
+	if PortOpen(svc.Port) {
+		return e.Port
+	}
+	return 0
+}
 
 // Prune 清理其中进程已不存在的记录，返回被清理的服务名。
 // 服务崩溃或被人手工 kill 后，状态文件不会自动更新，读到时才顺手清理。
