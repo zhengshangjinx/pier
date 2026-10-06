@@ -4475,14 +4475,26 @@
     // 另写一份判据的话，两处的数字迟早对不上，而它们说的是同一件事。
     var needle = search.trim().toLowerCase();
     var filtering = !!needle || quick !== "all";
+
+    // 「在跑」与「已停止」是同一件事的两半，两档加起来正好是全部：判据各写一份
+    // 迟早会漏掉一类，而漏掉的那个服务在两颗按钮下都找不到，看上去像凭空少了一个。
+    // 端口被别人占着那份也算「已停止」——它不是 Pier 起的，行上自会写着「外部占用」。
+    var isUp = function (s) { return s.running || s.statusKey === "starting"; };
+
     var matchSvc = function (s) {
-      if (quick === "running" && !(s.running || s.statusKey === "starting")) return false;
+      if (quick === "running" && !isUp(s)) return false;
+      if (quick === "stopped" && isUp(s)) return false;
       if (quick === "attention" && !needsAttention(s)) return false;
       if (!needle) return true;
-      // 名字、目录、端口都算命中：想找某个服务时，手里常常只有一个端口号，
-      // 或者记得它在哪个目录下，偏偏记不全它叫什么。
-      return (s.name + "\n" + s.dir + "\n" + (s.port > 0 ? String(s.port) : ""))
-        .toLowerCase().indexOf(needle) >= 0;
+      // 名字、目录、备注、分组都算命中：想找某个服务时，手里常常只有一个端口号，
+      // 或者记得它在哪个目录下、备注里写了句什么，偏偏记不全它叫什么；按分组搜
+      // 则是「把这个组的都列出来」——那是分组页干的事，但人先想到的是搜索框。
+      //
+      // 两个端口都收：清单里写的那个，与这次实际跑的那个（端口被占时会换一个）。
+      // 行上显示的是后者，只搜前者的话，照着屏幕上那个数敲进去什么也搜不到。
+      return [s.name, s.dir, s.group, s.userNote,
+        s.port > 0 ? String(s.port) : "", s.runPort > 0 ? String(s.runPort) : ""]
+        .join("\n").toLowerCase().indexOf(needle) >= 0;
     };
     var listIn = function (g) { return inGroup(g.name).filter(matchSvc); };
 
@@ -5074,10 +5086,11 @@
       <${A.Input} className="dc-search" allowClear value=${search} ref=${searchRef}
         title="⌘K 聚焦搜索" prefix=${e(IconSearch, { size: 13 })}
         onChange=${function (ev) { setSearch(ev.target.value); }}
-        placeholder="搜索服务、目录或端口"/>
+        placeholder="搜索名称、目录、端口、备注、分组"/>
       <${A.Segmented} value=${quick} onChange=${setQuick} options=${[
         { value: "all", label: "全部" },
         { value: "running", label: "在跑" },
+        { value: "stopped", label: "已停止" },
         { value: "attention", label: "异常" }]}/>
     </div>` : null;
 

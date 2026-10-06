@@ -196,7 +196,7 @@ body {
 
 .dc-filter { display: flex; align-items: center; gap: 10px; }
 
-/* 搜索框吃掉一点宽度就够了：它按名字/目录/端口过滤，词都很短。
+/* 搜索框吃掉一点宽度就够了：它按名字/目录/备注/分组/端口过滤，词都很短。
    给个下限，免得窗口一窄它先被压没。 */
 .dc-filter .dc-search { flex: 0 1 300px; min-width: 140px; }
 .dc-filter .ant-segmented { flex: none; }
