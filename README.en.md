@@ -171,7 +171,8 @@ process group.
 - A run crossing midnight keeps writing the same file — one run, one log.
 - Files are appended to; "this run only" is provided by a start marker plus trimming.
 - The GUI can browse past days, follow new output, search within the log (⌘F) with highlights,
-  copy everything, toggle wrapping, and render ANSI colors with the terminal palette.
+  copy what is shown or export it to a file (the drawer only reads the tail, so what you copy is
+  what you see), toggle wrapping, and render ANSI colors with the terminal palette.
 - Cleaning skips services that are currently running: the log fd belongs to that independent
   process, so deleting the file would only unlink it and free the space on exit.
 
@@ -214,7 +215,15 @@ process group.
   single **Preferences** row (updates, appearance and the manifest) showing the current version,
   replaced by a primary-coloured dot and the new version number when an update exists.
 - Reorder services by dragging, rename them (log directory moves along), duplicate one to edit.
-- Search and an "all / running / needs attention" filter; bulk start/stop follows the current page.
+- The two overview tiles (services / Pier itself) each carry a recent-usage curve, one row for
+  CPU and one for memory: a full-height row only means "highest in this window" — the absolute
+  numbers stay in the tile.
+- Groups fold on the "all services" page, so dozens of services are not one long scroll; a group
+  page never folds (it holds a single group), and neither does a filtered list — search means
+  "find me X", and folding the matching group away would hide it.
+- Search matches name, directory, port, note and group; the filter offers "all / running /
+  stopped / needs attention". Bulk start/stop follows the current page, and reopening Pier
+  returns to the page you left, with the window where you left it.
   Services you seldom need can be flipped to "All start/stop → Skip" in the form; they carry a
   "skipped" tag in the list, "Start all / Stop all" leaves them alone, and the overview says how
   many there are.
