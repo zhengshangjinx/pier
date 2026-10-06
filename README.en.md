@@ -243,6 +243,18 @@ The log drawer, SDK management, preferences and the dark theme (the rest are in
   Pier service definitions — the working directory, module and name are already correct there, and
   copying them into YAML by hand is easy to get wrong.
 - `pier detect` scans a directory and reports what it finds, with suggested kinds and ports.
+- `pier add` puts what it found straight into the manifest, with no copy-paste in between — run
+  `pier add` inside a project and it works it out; when it cannot, `--kind` and `--run` fill the gap.
+
+### Editing the manifest from the CLI
+
+`add` / `edit` / `rm` / `group` write to `services.json` in the data directory, through the same
+validation the GUI uses (`internal/manage`): port clashes, missing directories and deleting a
+running service are all caught there, and two copies of those rules would eventually disagree.
+Pointing `--config` at a YAML file is refused: by convention Pier does not rewrite a file you
+wrote by hand (`pier status --config` and the other read-only commands still work).
+
+Reopen the window to see the change: the GUI reads the manifest once, at startup.
 
 ## Tech stack
 
@@ -318,8 +330,11 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 
 ## Quick start
 
-1. Teach Pier about your projects: open `Pier.app` and add services under "All services", or use
-   `pier import <project dir>` / `pier detect <project dir>`.
+1. Teach Pier about your projects: open `Pier.app` and add services under "All services", or have
+   the command line do it — `cd` into the project and run `pier add`, which identifies the project
+   and files it away, or point it somewhere: `pier add ~/work/api`. It can also read the run
+   configurations of an existing IDEA project (`pier import <project dir>`), or just tell you what
+   it sees without writing anything (`pier detect <project dir>`).
 2. Run them:
 
    ```bash
@@ -345,6 +360,10 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier doctor` | Check that each language toolchain resolves, and report which one was chosen and why |
 | `pier detect [dir]` | Scan a directory, identify project types and suggest start commands |
 | `pier import [dir]` | Read `.idea` run configurations and convert them into Pier services |
+| `pier add [dir]` | Identify the project in a directory and add it; no directory means the current one, `--kind` / `--run` / `--port` override what it finds |
+| `pier edit <service> <flag>...` | Change a service; anything you leave out stays as it was (`--port` also rewrites the port inside its probe) |
+| `pier rm <service>...` | Delete services from the manifest; definitions only, not one file in the project directory |
+| `pier group [add\|rename\|rm]` | List the groups, and create, rename or delete one |
 | `pier up [service...]` | Start services; no name means "all" (skipping the ones marked `manual`), and an `@` prefix starts a group; `--port 0` starts the named one on another port, this run only |
 | `pier down [service...]` | Stop services |
 | `pier restart [service...]` | Restart services |

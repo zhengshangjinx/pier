@@ -313,6 +313,25 @@ func (in ServiceIn) toService() *config.Service {
 	}
 }
 
+// ServiceInFrom 把清单里的一条服务装回一份表单提交。
+//
+// 保存是整条替换：拿一份只填了端口的 ServiceIn 去保存，其余字段会被空值盖掉
+// ——改个端口顺手把备注、分组、依赖、手动标记全抹了。所以「只改一项」的入口
+// （命令行的 pier edit）必须先把旧的整条读出来再覆盖，这一份转换就是那道工序，
+// 与 toService 是同一个来回的两头。
+//
+// Env / Toolchain / DependsOn 有意留空：它们在 fillService 里的空值本就是
+// 「沿用旧值」，从旧值填一遍反而多绕一道。
+func ServiceInFrom(svc *config.Service) ServiceIn {
+	return ServiceIn{
+		Name: svc.Name, Dir: svc.Dir, Group: svc.Group, Kind: svc.Kind,
+		Run: svc.Run, Build: svc.Build, Module: svc.Module, Script: svc.Script,
+		Port: svc.Port, Health: svc.Health, Note: svc.Note,
+		Restart: svc.Restart, Manual: svc.Manual,
+		WatchOn: svc.Watch.On, WatchInclude: svc.Watch.Include,
+	}
+}
+
 // watchOf 把表单那两个控件收成清单里的那一行。
 //
 // 关掉开关就整个丢掉：留一个 `Include: ["src/**"]` 在盘上，下次打开表单会把它
@@ -1015,7 +1034,16 @@ func (m *Manager) InspectDir(dir string, hint InspectHint) (*InspectOut, error) 
 		}
 	}
 
-	if out.Kind == "" {
+	// 试推一次启动方案。这一步才是真正的「能不能跑起来」，
+	// 识别出类型只是识别出类型——比如 Python 目录里没有 main.py 就推不出命令。
+	kind := out.Kind
+	if k := strings.TrimSpace(hint.Kind); k != "" {
+		kind = k
+	}
+	// 「没认出类型」不是一条死路：调用方指定了类型（界面上的下拉、命令行上的 --kind）
+	// 就接着往下推。挡在这里的话，一个目录里本来就没有任何标记文件的项目——shell 项目
+	// 正是如此——连手填启动命令都加不进来。
+	if kind == "" {
 		out.Msg = "没认出项目类型。目录里没有 go.mod / pom.xml / package.json / pyproject.toml，" +
 			"请手动选择类型并填写启动命令"
 		// 类型都没认出来，也就无从知道去哪读端口，只能退回空闲端口。
@@ -1023,13 +1051,7 @@ func (m *Manager) InspectDir(dir string, hint InspectHint) (*InspectOut, error) 
 		out.OK = true
 		return out, nil
 	}
-
-	// 试推一次启动方案。这一步才是真正的「能不能跑起来」，
-	// 识别出类型只是识别出类型——比如 Python 目录里没有 main.py 就推不出命令。
-	kind := out.Kind
-	if k := strings.TrimSpace(hint.Kind); k != "" {
-		kind = k
-	}
+	out.Kind = kind
 	name := strings.TrimSpace(hint.Name)
 	if name == "" {
 		name = out.SuggestName
@@ -1042,7 +1064,9 @@ func (m *Manager) InspectDir(dir string, hint InspectHint) (*InspectOut, error) 
 	} else if kind == config.KindJava && probe.Module == "" && probe.Run == "" {
 		// Java 推不出来几乎总是缺子模块。直接把 pom.xml 里声明的模块列出来，
 		// 比一句「必须给出 module」有用得多——用户往往不记得模块叫什么。
-		out.Msg = "识别为 Java（Maven）工程，还需要指定跑哪个子模块：在下方「高级」里填写 Maven 子模块"
+		// 只说事实、不指路：跑哪个子模块在界面上是一个下拉，在命令行上是一个开关，
+		// 两边各自补自己那半句（见 internal/cli 的 cmdAdd）。
+		out.Msg = "识别为 Java（Maven）工程，还需要指定跑哪个子模块"
 		if mods := mavenModules(abs); len(mods) > 0 {
 			out.Msg += "，这个工程里有：" + strings.Join(mods, "、")
 		}

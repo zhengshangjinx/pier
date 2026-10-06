@@ -18,6 +18,10 @@ import (
 var handlers = map[string]func([]string) int{
 	"doctor":         cmdDoctor,
 	"detect":         cmdDetect,
+	"add":            cmdAdd,
+	"edit":           cmdEdit,
+	"rm":             cmdRm,
+	"group":          cmdGroup,
 	"import":         cmdImport,
 	"up":             cmdUp,
 	"down":           cmdDown,

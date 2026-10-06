@@ -948,6 +948,42 @@ func TestInspectDirDetectsGo(t *testing.T) {
 	}
 }
 
+// 目录里一个标记文件都没有时，「没认出类型」不是一条死路：调用方自己指定了类型
+// （界面上的下拉、命令行上的 --kind）就接着往下推。
+//
+// 挡在这里的话，shell 项目根本加不进来——那种项目的目录里按定义就没有标记文件，
+// 启动命令只能手写，而手写的入口就是这一条路。
+func TestInspectDirUsesKindFromForm(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+
+	out, err := h.m.InspectDir(dir, InspectHint{Kind: config.KindShell, Run: "sleep 300"})
+	if err != nil {
+		t.Fatalf("识别目录失败：%v", err)
+	}
+	if out.Plan == "" {
+		t.Errorf("写明了类型与启动命令，应当推得出来：msg=%q", out.Msg)
+	}
+	if !out.OK {
+		t.Error("OK 为假会让界面把这次识别当成失败")
+	}
+	if out.SuggestPort <= 0 {
+		t.Error("识别不出类型也该给一个没被占用的端口")
+	}
+
+	// 没说类型时照旧：给一句说明，让人自己去填。
+	out, err = h.m.InspectDir(dir, InspectHint{})
+	if err != nil {
+		t.Fatalf("识别目录失败：%v", err)
+	}
+	if out.Plan != "" {
+		t.Errorf("没说类型却推出了启动命令：%q", out.Plan)
+	}
+	if !strings.Contains(out.Msg, "没认出项目类型") {
+		t.Errorf("Msg = %q，应当说明没认出类型", out.Msg)
+	}
+}
+
 // 端口建议优先照抄项目自己声明的那个，而不是挑一个空闲端口塞给它。
 // FreePort 挑出来的端口是「没被占用」，但不一定是这个服务真正listen的端口，
 // 换掉它健康探针就永远探不通。

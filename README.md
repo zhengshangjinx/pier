@@ -206,6 +206,17 @@ Pier 把它们拿出来，变成一份清单加一个常驻的轻量入口：
 - `pier import` 读取 IDEA 的 `.idea/workspace.xml`，把里面已经调好的运行配置转成 Pier 的服务定义
   ——工作目录、模块、启动项名字都是现成的，手工抄成 YAML 极易抄错。
 - `pier detect` 扫一个目录，认出里面有哪些项目、各自该用什么类型和端口。
+- `pier add` 把认出来的东西直接加进清单，不必先看一遍再手抄
+  ——站在项目里敲一句 `pier add` 就够了，认不出类型时用 `--kind` 与 `--run` 补上。
+
+### 从命令行改清单
+
+`add` / `edit` / `rm` / `group` 改的是数据目录里那份 `services.json`，
+与界面上的编辑走同一套校验（`internal/manage`）：端口撞车、目录不存在、正在跑的服务不许删
+都在那里拦下，在两处各写一份迟早会有一处放行。拿 `--config` 指到一份 YAML 上会被拒绝：
+按约定 Pier 不改写人手写的文件（`pier status --config` 这类只读的照常能用）。
+
+改完要**重开窗口**才看得见：界面只在启动与切换清单时读一次。
 
 ## 技术栈
 
@@ -280,8 +291,10 @@ ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier   # 要 /us
 
 ## 快速开始
 
-1. 让 Pier 认识你的项目：打开 `Pier.app`，在「全部服务」里新建服务；
-   或者用命令行 `pier import <项目目录>` / `pier detect <项目目录>` 生成一份。
+1. 让 Pier 认识你的项目：打开 `Pier.app`，在「全部服务」里新建服务；或者让命令行来——
+   在项目目录里敲一句 `pier add`，它自己认出这是个什么项目并记下来；也可以指过去：
+   `pier add ~/work/api`。现成的 IDEA 项目可以直接读它的运行配置（`pier import <项目目录>`），
+   只想看看它认出了什么、一个字都不写则是 `pier detect <项目目录>`。
 2. 起服务：
 
    ```bash
@@ -307,6 +320,10 @@ ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier   # 要 /us
 | `pier doctor` | 检查各语言工具链能不能解析，并说明选了哪一个、依据是什么 |
 | `pier detect [目录]` | 扫描目录，识别项目类型并给出建议的启动项 |
 | `pier import [目录]` | 读取 `.idea` 运行配置，转成 Pier 的服务定义 |
+| `pier add [目录]` | 认出一个目录里的项目并加进清单；不给目录就用当前目录，`--kind` / `--run` / `--port` 可逐项指定 |
+| `pier edit <服务> <开关>...` | 改一条服务，没提到的栏目原样留着（`--port` 会连带改写探针里的端口） |
+| `pier rm <服务>...` | 从清单里删掉这些服务；只删定义，项目目录里的文件一个都不动 |
+| `pier group [add\|rename\|rm]` | 看有哪些分组，以及新建、改名、删掉一个分组 |
 | `pier up [服务...]` | 启动服务；不带名字是「全部」（跳过标了 `manual` 的），名字前加 `@` 按分组起；`--port 0` 让点名的那个换一个端口起，只这一次 |
 | `pier down [服务...]` | 停止服务；不带名字时的「全部」与 `up` 是同一份名单 |
 | `pier restart [服务...]` | 重启服务 |
