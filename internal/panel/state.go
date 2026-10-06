@@ -88,6 +88,17 @@ type ServiceOut struct {
 	// Manual 表示它不参与全部启停。列表上据此挂一个标记：这一行是「全部启动」
 	// 按下去也不会起来的那几个之一，不标出来就只能靠用户记得自己标过。
 	Manual bool `json:"manual"`
+	// Watch 是这个服务正在盯的那些模式，没配则为空。
+	//
+	// 回传的是**实际生效的**那一份（`watch: true` 已经按类型展开过），不是清单里
+	// 写的那个 true：界面要说的是「它盯着什么」，而 true 到模式那一步的换算
+	// 只有后端做得出来，界面自己再推一遍迟早会推出第二份规矩。
+	Watch []string `json:"watch"`
+	// WatchAuto 说明上面那张单子是按类型来的默认，不是清单里点名的。
+	//
+	// 编辑表单要靠它：读出来的是展开过的那一份，照着它填回去就等于把「按类型」
+	// 换成了「就这几个」——用户只是改了下端口再保存，默认就悄悄冻在这一版了。
+	WatchAuto bool `json:"watchAuto"`
 	// RestartNote 说明这个服务最近被自动重启过几次，没发生过则为空。
 	//
 	// 有它才看得出「它自己崩过又起来了」：不然界面只显示一个正常的「运行中」，
@@ -331,6 +342,8 @@ func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr 
 			DependsOn:    svc.DependsOn,
 			Restart:      svc.Restart,
 			Manual:       svc.Manual,
+			Watch:        svc.WatchPatterns(),
+			WatchAuto:    svc.Watch.On && len(svc.Watch.Include) == 0,
 			RestartNote:  noteText(notes.Restart, svc.Name),
 			DepNote:      view.DepMissed(depNames(notes.Deps, svc.Name)),
 			Editable:     cfg.IsStore(),

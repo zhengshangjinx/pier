@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zhengshangjinx/pier/internal/watch"
 )
 
 // 服务类型。不论哪种类型，启动最终都归结为「可选编译 + 运行」两步，
@@ -107,6 +109,10 @@ type Service struct {
 	DependsOn []string `yaml:"depends_on" json:"depends_on,omitempty"`
 	// Restart 是进程意外退出后的重启策略，取值见 RestartOnFailure；留空不重启。
 	Restart string `yaml:"restart" json:"restart,omitempty"`
+	// Watch 是「改完自动重启」：写了 true 就按类型盯一套默认，也可以自己点名盯哪些
+	// （见 config.Watch）。它与 Restart 是两件事，各配各的——一个是「文件变了重来一次」，
+	// 一个是「进程没了再拉起来」，一个服务可能只要后者。
+	Watch Watch `yaml:"watch,omitempty" json:"watch,omitempty"`
 
 	// Origin 记录这条定义来自 pier.yaml 还是覆盖文件，由加载时填充。
 	// 界面据此决定「删除」是能真删，还是只能隐藏。
@@ -279,6 +285,13 @@ func (c *Config) validateServices() error {
 		}
 		if msg := healthProblem(s.Health); msg != "" {
 			return fmt.Errorf("服务 %s 的 health %s", s.Name, msg)
+		}
+		for _, p := range s.Watch.Include {
+			// 模式写错了不会报错，只是盯不到东西——界面上看着一切正常，
+			// 而人改了半天代码没有任何反应，那时再回头查这句「src\**」要花很久。
+			if err := watch.CheckPattern(p); err != nil {
+				return fmt.Errorf("服务 %s 的 watch：%w", s.Name, err)
+			}
 		}
 		for _, d := range s.DependsOn {
 			if DepName(d) == "" {

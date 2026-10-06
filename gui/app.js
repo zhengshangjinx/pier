@@ -249,6 +249,9 @@
         // 依赖、重启与「全部」：默认没有前置、不自动重启、算在「全部」里，
         // 需要演的那几条各自覆盖。
         dependsOn: [], restart: "", restartNote: "", depNote: "", manual: false,
+        // 改完自动重跑：默认不盯。需要演的那几条各自覆盖，两种来源各摆一条
+        // （按类型自动的与清单里点名的），编辑表单里那两栏的样子才核对得到。
+        watch: [], watchAuto: false,
         runtimes: [DEMO_GO],
         usage: { cpu: 0, memBytes: 0, procs: 0 }
       }, o);
@@ -312,8 +315,18 @@
           statusText: "外部运行", portOpen: true, runtimes: [DEMO_NODE],
           occupant: { port: 47813, pid: 8142, command: "node", user: "you" },
           note: "端口被 Pier 之外的进程占用" }),
+        // 这一条演「改完自动重跑」里按类型自动的那一种：清单里写的是 watch: true，
+        // 展开成什么样由后端算（这里照着 config.DefaultWatchPatterns 摆），
+        // 而 watchAuto 说的是「这串不是我点名的」，编辑表单据此把模式那一栏留空。
+        mk({ name: "shop-gateway", kind: "java", port: 47822, group: "示例服务",
+          module: "shop-gateway", watchAuto: true,
+          watch: ["src/main/**", "src/test/**", "pom.xml"],
+          note: "改完源码自动重跑" }),
         mk({ name: "shop-admin", kind: "java", port: 47821, group: "示例服务",
           module: "shop-admin", health: "http://localhost:47821/actuator/health",
+          // 另一条演「清单里点了名的那几个」：模式是手写的，watchAuto 为假，
+          // 编辑表单把它们原样填回「盯哪些文件」。
+          watch: ["src/main/resources/**", "src/main/webapp/**"],
           env: { SPRING_PROFILES_ACTIVE: "dev" },
           toolchain: { java: "/Users/you/.sdkman/candidates/java/21.0.9-oracle" },
           runtimes: [DEMO_JAVA, DEMO_MAVEN_WRAPPER],
@@ -1589,6 +1602,14 @@
               style=${{ fontSize: token.fontSizeSM,
                 color: token.colorTextTertiary, background: token.colorFillQuaternary }}>
               跳过全部</span>` : null}
+            ${"" /* 盯着文件的那些也挂一颗。它解释的是「它怎么自己重起了」——
+                   过程里没有任何人点过那一下，而界面上只会看到一次重启，
+                   不标出来就只能靠用户记得自己配过。 */}
+            ${(s.watch || []).length ? html`<span className="dc-kind"
+              title=${"改完自动重跑：盯 " + s.watch.join("、")}
+              style=${{ fontSize: token.fontSizeSM,
+                color: token.colorTextTertiary, background: token.colorFillQuaternary }}>
+              改完重跑</span>` : null}
             ${rtText ? html`<span className="dc-runtime" title=${rtTip}
               style=${{ fontSize: token.fontSizeSM,
                 color: rtWarn ? token.colorWarning : token.colorTextTertiary }}>
@@ -1989,6 +2010,18 @@
   };
   var ADV_HINT_DEFAULT = { run: "如 ./start.sh", build: "如 make build", env: "APP_ENV=dev" };
 
+  // 「改完自动重跑」留空时按类型盯哪些文件. 这份说明照着后端那套默认写
+  // （config.DefaultWatchPatterns），说给用户听的是「会盯上什么」，不是模式语法。
+  // 它只是一句话，真正的名单由后端给：对不上时错的是这句话，不是行为。
+  var WATCH_HINTS = {
+    go: "go 服务盯 *.go、go.mod、go.sum",
+    java: "Java 服务盯 src/main、src/test 与 pom.xml",
+    node: "前端 / Node 服务盯 js、ts、vue、svelte、css、html 与 package.json",
+    python: "Python 服务盯 *.py、requirements.txt、pyproject.toml",
+    shell: "认不出类型的目录：整个目录都盯（产物目录仍然排除）"
+  };
+  var WATCH_HINT_DEFAULT = WATCH_HINTS.shell;
+
   // 共享环境变量那一段说明。${...} 只能写在引号里再插进来：它直接摆进
   // html`` 模板的话会被当成插值，那一块（连同整页）当场渲染不出来。
   var ENV_HINT_TEXT = "值里可以引用别的变量（写成 ${NAME}），服务自己的端口用 ${PORT} 取；"
@@ -2000,7 +2033,8 @@
   var EMPTY_FORM = {
     name: "", dir: "", group: undefined, kind: undefined, run: "", build: "",
     module: "", script: "", port: null, health: "", note: "", env: "",
-    dependsOn: [], restart: undefined, manual: false
+    dependsOn: [], restart: undefined, manual: false,
+    watchOn: false, watchInclude: []
   };
 
   // 环境变量在表单里是多行文本（一行一个 KEY=VALUE），存的时候是对象。
@@ -2134,6 +2168,10 @@
     // 决定显示哪一组类型专属设置：手选的优先，其次目录识别出来的，再次编辑时原来的。
     var kindEff = kindNow || (info && info.kind) || (editing && editing.kind) || "";
     var advHint = ADV_HINTS[kindEff] || ADV_HINT_DEFAULT;
+    // 「盯哪些文件」只在开关打开时才出现：关着的时候摆一个填了也不生效的输入框，
+    // 会让人以为「填上这些就等于打开监视」。
+    var watchOnNow = A.Form.useWatch("watchOn", form);
+    var watchHint = WATCH_HINTS[kindEff] || WATCH_HINT_DEFAULT;
 
     // 截图核对用：端口选择平时只能靠点「选择…」打开，钩子打不开就拍不到。
     React.useEffect(function () {
@@ -2186,7 +2224,15 @@
         // 「不参与全部启停」那颗开关同理：不回填的话，编辑一次就把它关掉了，
         // 而那次编辑多半只是改了个端口。
         dependsOn: editing.dependsOn || [], restart: editing.restart || undefined,
-        manual: !!editing.manual
+        manual: !!editing.manual,
+        // 「改完自动重跑」也一样要回填，而且这里更容易出错：后端给的那串模式是
+        // **展开过的**（watch: true 已经按类型摊开），照着它填进「盯哪些文件」，
+        // 保存一次就把「按类型」换成「就这几个」——用户只是改了个端口，
+        // 默认却在那一刻悄悄冻住了。watchAuto 说的就是「这串是默认，不是我点名的」，
+        // 它为真（或清单里开着但摊开是空的，比如 shell 服务）时把模式留空，
+        // 让那一栏继续显示它的占位文字。
+        watchOn: !!editing.watchAuto || (editing.watch || []).length > 0,
+        watchInclude: editing.watchAuto ? [] : (editing.watch || [])
       } : Object.assign({}, EMPTY_FORM, { group: props.defaultGroup || undefined }));
       // 依赖项只认端口号这个数。写成整个 adopt 对象的话，上层每 2 秒刷一次状态都会
       // 换一个新对象，这一处预填就会跟着重跑一遍——用户刚改好的那几栏会被抹回原样。
@@ -2350,6 +2396,9 @@
           // 这两栏每次都发全：空数组表示「没有前置」，空串表示「不自动重启」，
           // 都是明确的意图，与「这次提交没带这一项」分得开（见 manage.ServiceIn）。
           dependsOn: v.dependsOn || [], restart: v.restart || "",
+          // 监视这两栏也每次发全：开关是开关，模式那一栏空着就是「按类型自动」，
+          // 两者都是明确的意图（见 manage.watchOf）。
+          watchOn: !!v.watchOn, watchInclude: v.watchInclude || [],
           // 名称那一栏改了就叫一次改名。送的是「编辑前叫什么」，由后端把改名和
           // 覆盖保存放进同一次写盘：分两次发的话，中间任何一步失败都会留下
           // 名字和内容对不上的半截状态。
@@ -2659,6 +2708,20 @@
             extra="打开后，界面上的「全部启动 / 全部停止」和命令行的 pier up / pier down（都不带名字时）都会跳过它；点名或用分组时照常启停。">
             <${A.Switch} checkedChildren="跳过" unCheckedChildren="参与"/>
           <//>
+          ${"" /* 改完自动重跑。它与上面那栏「退出之后」是两件事，各配各的：
+                 一个管进程自己没了要不要再拉起来，一个管文件变了重来一次。
+                 一个服务可能只要后者（写前端页面的人），也可能只要前者。
+                 这一栏不跟着分组走，也不跟着别的服务走——它只跟这个服务自己有关。 */}
+          <${A.Form.Item} name="watchOn" label="文件改动" valuePropName="checked"
+            extra="打开后，这个目录里的源码一变就自动重跑一次（连着的几次改动合并成一次，等它静下来再动手）。服务没在跑时不会因为文件变了被拉起来；产物目录（node_modules、target、dist、.git 等）与 Pier 自己的日志、产物一律不盯。">
+            <${A.Switch} checkedChildren="自动重跑" unCheckedChildren="不盯"/>
+          <//>
+          ${watchOnNow ? html`<${A.Form.Item} name="watchInclude" label="盯哪些文件"
+            extra=${"留空按类型自动：" + watchHint}>
+            <${A.Select} mode="tags" allowClear
+              placeholder="留空，按这个服务的类型自动认"
+              tokenSeparators=${[",", " "]}/>
+          <//>` : null}
         </section>
 
         <section className="dc-card">

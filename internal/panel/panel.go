@@ -149,6 +149,12 @@ type Panel struct {
 	// 一个还在崩溃循环里的服务不该重新拥有全部额度（见 restarts.go）。
 	restarts map[string][]time.Time
 
+	// watching 是配了文件监视的那几个服务此刻盯着的树，键是服务名（见 watch.go）。
+	//
+	// 只有巡检那一条协程碰它，不进 p.mu：它是「上一趟扫到哪儿了」这份过程状态，
+	// 别处没有读者，加锁只是让人以为它被共享着。
+	watching map[string]*watchState
+
 	// restartClaim 是「自动重启这把活归我干」的独占权，拿不到时为 nil。
 	//
 	// 同一台机器上可以同时开着不止一个 Pier：图形界面、命令行面板、pier api。
@@ -239,8 +245,9 @@ func New() *Panel {
 	// 清单目录建不出来时也照样跑：拿不到锁顶多是别的进程在巡检，
 	// 而这里是「连目录都没有」，多半是第一次运行，不会有人跟它抢。
 	p.restartLock = restartLockPath()
+	p.watching = map[string]*watchState{}
 	p.ensureRestartLock()
-	go p.watchRestarts()
+	go p.patrol()
 	return p
 }
 
@@ -590,25 +597,11 @@ func (p *Panel) exec(j job) {
 // 为什么是自己轮询而不是让服务退出时通知 Pier：服务是 setsid 出去的独立进程，
 // 日志 fd 由它继承，Pier 这边连一个能 Wait 的句柄都没有——进程什么时候没的，
 // 除了回头去看没有别的途径。轮询因此不是偷懒，是唯一可行的做法。
+//
+// 跑这件事的协程在 watch.go（patrol）：它同时管文件监视，因为那件事也只在
+// 持有独占权时做，而独占权的判断只该有一处。
 
-func (p *Panel) watchRestarts() {
-	t := time.NewTicker(restartPoll)
-	defer t.Stop()
-	for {
-		select {
-		case <-p.done:
-			return
-		case <-t.C:
-			// 独占权每轮重问一次：持有它的那个窗口退出之后要能接过去。
-			// 抢不到的这一轮什么都不做——另一个窗口正在巡检同一批服务。
-			if !p.ensureRestartLock() {
-				continue
-			}
-			p.recoverCrashed()
-		}
-	}
-}
-
+// recoverCrashed 是上面那条巡检每 restartPoll 一轮做的那件事。
 func (p *Panel) recoverCrashed() {
 	p.mu.Lock()
 	cfg := p.cfg

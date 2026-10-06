@@ -1,10 +1,12 @@
 package manage
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1371,5 +1373,96 @@ func TestSaveServiceRoundTripsManual(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "manual") {
 		t.Errorf("关掉之后清单里不该还留着这一项：\n%s", raw)
+	}
+}
+
+// watch 这一项也要能从表单走到盘上再读回来，而且两种来源要分得开。
+//
+// 「按类型自动」与「清单里点名的」在清单里是两种写法（true 与一串模式），
+// 表单里是两个控件（开关 + 模式）。读回来那一份是展开过的——照它填回表单，
+// 保存一次就把「按类型」换成「就这几个」，而用户只是改了个端口。
+func TestSaveServiceRoundTripsWatch(t *testing.T) {
+	h := newHarness(t)
+
+	// 开关打开、模式留空 = 清单里一个 watch: true。
+	if _, err := h.m.SaveService(ServiceIn{Name: "mock", Dir: "m", Kind: "go", WatchOn: true}); err != nil {
+		t.Fatal(err)
+	}
+	got := h.svc("mock")
+	if !got.Watch.On || len(got.Watch.Include) != 0 {
+		t.Errorf("存成了 %+v，想要「开着、没点名」", got.Watch)
+	}
+	// 盘上是一个布尔 true，不是 [true]、也不是一个对象：清单里就两种写法，
+	// 写成别的形状下次打开这份数据文件就解不动了。
+	if w := storedWatch(t, h, "mock"); w != true {
+		t.Errorf("数据文件里的 watch = %#v，想要 true", w)
+	}
+	// 落盘的那一份读出来要是展开过的模式：状态与界面说的「它盯着什么」就是这一份。
+	if len(got.WatchPatterns()) == 0 {
+		t.Error("按类型展开出来是空的")
+	}
+
+	// 点名几个 = 清单里一串模式。
+	if _, err := h.m.SaveService(ServiceIn{
+		Name: "mock", Dir: "m", Kind: "go", WatchOn: true, WatchInclude: []string{" src/** ", "src/**", "go.mod"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.svc("mock"); !reflect.DeepEqual(got.Watch.Include, []string{"src/**", "go.mod"}) {
+		t.Errorf("点名的那几个 = %v，想要去掉空白与重复的 [src/** go.mod]", got.Watch.Include)
+	}
+	if w := storedWatch(t, h, "mock"); !reflect.DeepEqual(w, []any{"src/**", "go.mod"}) {
+		t.Errorf("数据文件里的 watch = %#v，想要 [src/** go.mod]", w)
+	}
+
+	// 关掉要真的关掉：读回来是关的，盘上也不许留着上面那串模式——留着的话下次
+	// 打开表单会把它填回去，看着像「这服务盯着 src」，而它此刻并没有在盯。
+	// 剩下一个 false 是允许的：encoding/json 的 omitempty 不去看结构体的 IsZero，
+	// 那一项在数据文件里省不掉（见 config.Watch.IsZero）。
+	if _, err := h.m.SaveService(ServiceIn{Name: "mock", Dir: "m", Kind: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.svc("mock"); got.Watch.On || len(got.Watch.Include) != 0 {
+		t.Errorf("关掉之后读回来还开着：%+v", got.Watch)
+	}
+	if w := storedWatch(t, h, "mock"); w != nil && w != false {
+		t.Errorf("关掉之后数据文件里还留着 watch = %#v", w)
+	}
+}
+
+// storedWatch 读出数据文件里那个服务这一项**原样的样子**（这里要的是形状，
+// 不是解出来的结构：字段漏了 omitsempty、写成 false 或空数组，都是这里才看得见）。
+func storedWatch(t *testing.T, h *harness, name string) any {
+	t.Helper()
+	raw, err := os.ReadFile(h.store)
+	if err != nil {
+		t.Fatalf("读数据文件失败：%v", err)
+	}
+	var doc struct {
+		Services []map[string]any `json:"services"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("数据文件解不动：%v", err)
+	}
+	for _, s := range doc.Services {
+		if s["name"] == name {
+			return s["watch"]
+		}
+	}
+	t.Fatalf("数据文件里没有 %s", name)
+	return nil
+}
+
+// TestSaveServiceRejectsBadWatchPattern 钉着表单里的模式也在这一道被拦下。
+//
+// 界面这一层拦不住手输（tags 输入框里什么都能敲），而放进去的后果是
+// 那份数据文件此后加载不了——报错要等到下次启动才看得到。
+func TestSaveServiceRejectsBadWatchPattern(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.m.SaveService(ServiceIn{
+		Name: "mock", Dir: "m", Kind: "go", WatchOn: true, WatchInclude: []string{"../outside/**"},
+	})
+	if err == nil {
+		t.Fatal("模式钻出服务目录，保存却没报错")
 	}
 }

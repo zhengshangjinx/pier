@@ -286,6 +286,13 @@ type ServiceIn struct {
 	// Manual 表示它不参与全部启停。开关没有第三态，表单每次都把它发全，
 	// 所以也不需要「这次没带这一项」那种保留语义。
 	Manual bool `json:"manual"`
+	// WatchOn 是「改完自动重启」那个开关；WatchInclude 是点名要盯的模式，
+	// 留空表示按类型给一套默认（见 config.WatchPatterns）。
+	//
+	// 这两项与清单里的那一行不是同一形状：清单里是 `true` 或一串模式（`Watch`
+	// 自己管着那两种写法的来回），而表单里是两个控件，各自发各自的。
+	WatchOn      bool     `json:"watchOn"`
+	WatchInclude []string `json:"watchInclude"`
 	// OrigName 是「这次提交之前它叫什么」。表单里名称那一栏是可以改的，改了名字
 	// 的那一次提交必须先改名再覆盖保存：直接按新名字 Upsert 会多出一条，旧的那条
 	// 原样留在清单里，而用户以为自己只是改了个名字。
@@ -302,7 +309,37 @@ func (in ServiceIn) toService() *config.Service {
 		Module: strings.TrimSpace(in.Module), Script: strings.TrimSpace(in.Script),
 		Port: in.Port, Health: strings.TrimSpace(in.Health), Note: strings.TrimSpace(in.Note),
 		Restart: strings.TrimSpace(in.Restart), Manual: in.Manual,
+		Watch: watchOf(in),
 	}
+}
+
+// watchOf 把表单那两个控件收成清单里的那一行。
+//
+// 关掉开关就整个丢掉：留一个 `Include: ["src/**"]` 在盘上，下次打开表单会把它
+// 填回去，看着像是「这服务盯着 src」——而它此刻并没有在盯。
+func watchOf(in ServiceIn) config.Watch {
+	if !in.WatchOn {
+		return config.Watch{}
+	}
+	return config.Watch{On: true, Include: cleanPatterns(in.WatchInclude)}
+}
+
+// cleanPatterns 收拾一份模式单：去空白、去空串、去重，保持原本的先后。
+//
+// 去重和 cleanDeps 是同一个理由：同一句写两遍在界面上看不出来，
+// 而它会让「盯着的模式」那一栏凭空长出一行重复的。
+func cleanPatterns(in []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(in))
+	for _, p := range in {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // cleanDeps 收拾一份前置清单：去空白、去空名、去重，保持原本的先后。

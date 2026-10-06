@@ -71,6 +71,13 @@ process group.
   a bare `pier up` / `pier down`, and the panel's "Start all / Stop all", leave them alone —
   naming them or starting their group still reaches them. Manifests tend to carry a few mock,
   capture or frontend-only services you would otherwise have to pick out by hand every time.
+- A service you keep editing can say `watch: true` ("Rerun on change" in the form): Pier watches its
+  directory and runs an ordinary restart once changes settle (400ms). `true` picks a per-kind default
+  (Go watches `*.go` and `go.mod`, Java watches `src/main/**` and `pom.xml`); you can also name a list
+  of patterns yourself. Build-product directories are never watched (`node_modules`, `target`, `dist`,
+  `.git`, plus Pier's own logs and bin) — otherwise a compile would drop an artifact, restart the
+  service, and loop forever. Such a restart does not spend the "automatic restart" quota, and never
+  starts a service that is not already running.
 - Groups are not just a panel concept: `pier up @frontend` starts exactly what the frontend page
   shows (`@Ungrouped` works too). A group is an explicit list of services, so it includes the
   ones marked `manual`.
@@ -419,6 +426,7 @@ services:
     group: frontend
     depends_on: [api:healthy] # wait for api's probe; a bare name only orders the start
     restart: on-failure      # bring it back when it disappears without going through Stop
+    watch: true              # rerun on change; a list narrows it to the files you name
   - name: mock
     dir: ./mock
     manual: true             # out of "all start/stop"; named or grouped starts still reach it
@@ -443,6 +451,7 @@ The two top-level keys apply to every service: `toolchain` sets a global default
 | `toolchain` | Per-service toolchain override, taking precedence over the top level |
 | `depends_on` | Services that must come first (a list). A bare name orders the start only: it starts first and stops last, and a service still starts when its dependency failed. `name:healthy` also waits, see below |
 | `restart` | Takes one value, `on-failure`: bring the process back when it disappears without going through Stop. Empty means no automatic restart |
+| `watch` | `true`, or a list of patterns (e.g. `["src/**", "pom.xml"]`): rerun on change. `true` picks a per-kind default (an unrecognised kind watches the whole directory); a list narrows it to what you name, see below |
 | `manual` | True keeps it out of "all start/stop": a bare `pier up` / `pier down`, and the panel's "Start all / Stop all", skip it; naming it or starting its group still reaches it. Start and stop are symmetric — excluding only the start side would let `pier restart` stop it and never bring it back |
 
 The three forms of `health`:
@@ -461,6 +470,20 @@ ready never blocks the start**: the service comes up anyway, the state says "mys
 ready", and `pier up` lists it in its own closing section — it is already running, and sitting
 there doing nothing is harder to explain than starting and saying so. Waiting does not hold up the
 pipeline either: services queued behind a waiting one still start.
+
+`watch` looks at the service's own directory, and takes effect once it is saved back into the
+manifest. `true` asks for the per-kind default; a list narrows it to what you name — **a pattern
+without `/` matches at any depth** (`*.go` also matches `sub/dir/a.go`), one with `/` is relative to
+the service directory, and a trailing `/` means "everything under that directory" (`src/` equals
+`src/**`). Build-product and VCS directories are never watched and are not configurable:
+`node_modules`, `target`, `dist`, `build`, `.git`, `__pycache__` and the like (the full list is in
+`internal/watch`), together with Pier's own data directory — without those, an artifact landing in
+the service directory would restart the service, which drops another artifact, forever. Only a
+service that is **already running** is restarted by a file change; a stopped one is not brought up.
+That restart does not spend the "automatic restart" quota (three times in ten minutes) either:
+editing a file five times is normal, and sharing the ledger would let a few edits exhaust the quota
+and leave a real crash unrecovered. A watch restart that fails to come up (a compile error in what
+you just saved, say) still sends a notification, like any other automatic restart.
 
 Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=true -Djib.skip=true`
 — local runs don't build images.

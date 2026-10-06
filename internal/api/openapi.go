@@ -318,6 +318,8 @@ const openAPISpec = `{
           "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "前置服务。只写名字的（\"mysql\"）只排启动顺序；带 \":healthy\" 的（\"mysql:healthy\"）还会在启动之前等它就绪，等不到照样起，结果写在 depNote 里。" },
           "restart": { "type": "string", "description": "重启策略，目前只有 on-failure：不是 Pier 叫它停的，就再起一次。留空不重启。" },
           "manual": { "type": "boolean", "description": "为真表示它不参与全部启停：「全部启动 / 全部停止」（界面上的按钮、pier up 与 pier down 不带名字时的那个「全部」）都会跳开它，点名时照做。" },
+          "watch": { "type": "array", "items": { "type": "string" }, "description": "这个服务正在盯的那些文件模式（相对服务目录），改了这些文件就会重跑一次。清单里写 watch: true 时这里给的是按类型展开后的那一份——界面要说的是「它盯着什么」。空表示没配监视。" },
+          "watchAuto": { "type": "boolean", "description": "为真表示上面那串模式是按服务类型给的默认，不是清单里点名的；为假而 watch 非空表示清单里就写了这些。" },
           "restartNote": { "type": "string", "description": "最近几次自动重启的说明，没发生过则为空。" },
           "depNote": { "type": "string", "description": "最近一次启动没等到的前置，如「没有等到 mysql 就绪」；等到了或没有要等的则为空。只在被启动的那一次记得住，重启 Pier 之后不再有。" },
           "editable": { "type": "boolean", "description": "为真表示这条定义在 Pier 自己的数据文件里，能改也能删；命令行指定 YAML 清单时为假。" },
