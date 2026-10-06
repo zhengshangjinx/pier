@@ -221,6 +221,14 @@ func PruneLogs(root, name string, skip map[string]bool, keepDays int, now time.T
 		return out
 	}
 	cutoff := pruneCutoff(now, keepDays)
+	// emptied 记下哪些服务目录是被这一次清理掏空的。
+	//
+	// 空目录只收自己掏空的那几个，不扫整棵日志树：正启动着的服务目录刚建出来、
+	// 日志文件还没打开（见 Supervisor.StartContext），那一瞬间看着也是空的。
+	// 按「空就收」去扫，删掉的就是它的目录，那次启动随后死在「打开日志文件失败」
+	// 上——报出来的是一句和清理毫无关系的错，且只在两个服务一前一后同时起来时
+	// 才碰得上。命名的服务只清它自己那一个，也是这个函数本来的说法。
+	emptied := map[string]bool{}
 	_ = filepath.WalkDir(pruneBase(root, name), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || skip[serviceOf(root, path)] {
 			return nil
@@ -234,9 +242,16 @@ func PruneLogs(root, name string, skip map[string]bool, keepDays int, now time.T
 		}
 		out.Files++
 		out.Bytes += fi.Size()
+		// 直接躺在根上的文件没有「它属于哪个服务」可言，别拿文件名去拼一个
+		// 同名的目录。
+		if filepath.Dir(path) != root {
+			emptied[serviceOf(root, path)] = true
+		}
 		return nil
 	})
-	dropEmptyDirs(root)
+	for svc := range emptied {
+		dropEmptyDir(filepath.Join(root, svc))
+	}
 	return out
 }
 
@@ -359,16 +374,9 @@ func logExpired(name string, mod time.Time, cutoff string) bool {
 	return mod.Format(config.LogDateLayout) < cutoff
 }
 
-// dropEmptyDirs 收掉日志根目录下已经空掉的服务目录。
-// 用 os.Remove 而不是 RemoveAll：它删不掉非空目录，这一条正好当作保护。
-func dropEmptyDirs(root string) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			_ = os.Remove(filepath.Join(root, e.Name()))
-		}
-	}
+// dropEmptyDir 收掉一个已经空掉的服务目录。
+// 用 os.Remove 而不是 RemoveAll：它删不掉非空目录，这一条正好当作保护——
+// 这个目录里只要还有一份日志没超期，它就留在那儿。
+func dropEmptyDir(dir string) {
+	_ = os.Remove(dir)
 }

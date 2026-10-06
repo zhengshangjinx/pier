@@ -178,6 +178,28 @@ func TestPruneLogsDropsEmptyServiceDir(t *testing.T) {
 	}
 }
 
+func TestPruneLogsLeavesOtherServicesDirAlone(t *testing.T) {
+	// 空目录只收自己掏空的那几个。别的服务那会儿可能正启动着：它的目录刚建出来、
+	// 日志文件还没打开（见 Supervisor.StartContext），此刻看上去和「清空了」一模一样。
+	// 扫整棵树去收空目录，收掉的就是它，那次启动随后死在「打开日志文件失败」上。
+	root := t.TempDir()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.Local)
+	writeLog(t, root, "alpha", day(now, 30), "超期")
+	if err := os.MkdirAll(filepath.Join(root, "beta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	PruneLogs(root, "alpha", nil, LogKeepDays, now)
+
+	if _, err := os.Stat(filepath.Join(root, "beta")); err != nil {
+		t.Errorf("没点名的服务目录不该被收掉：%v", err)
+	}
+	// 自己这一个照样收：掏空的收掉，这一条没变（见 TestPruneLogsDropsEmptyServiceDir）。
+	if _, err := os.Stat(filepath.Join(root, "alpha")); !os.IsNotExist(err) {
+		t.Error("被自己掏空的那个目录应当收掉")
+	}
+}
+
 func TestPruneLogsDisabledWhenKeepDaysIsZero(t *testing.T) {
 	// keepDays <= 0 是「不清理」而不是「全清」——这个判断写反的代价是
 	// 一次启动把用户所有历史日志清光，所以单钉一条。
