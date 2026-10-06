@@ -283,6 +283,9 @@ type ServiceIn struct {
 	// Restart 是重启策略，空串表示不自动重启（也是默认值），所以不需要保留语义：
 	// 表单每次都把它发全，缺省就等于用户没要。
 	Restart string `json:"restart"`
+	// Manual 表示它不参与全部启停。开关没有第三态，表单每次都把它发全，
+	// 所以也不需要「这次没带这一项」那种保留语义。
+	Manual bool `json:"manual"`
 	// OrigName 是「这次提交之前它叫什么」。表单里名称那一栏是可以改的，改了名字
 	// 的那一次提交必须先改名再覆盖保存：直接按新名字 Upsert 会多出一条，旧的那条
 	// 原样留在清单里，而用户以为自己只是改了个名字。
@@ -298,7 +301,7 @@ func (in ServiceIn) toService() *config.Service {
 		Run: strings.TrimSpace(in.Run), Build: strings.TrimSpace(in.Build),
 		Module: strings.TrimSpace(in.Module), Script: strings.TrimSpace(in.Script),
 		Port: in.Port, Health: strings.TrimSpace(in.Health), Note: strings.TrimSpace(in.Note),
-		Restart: strings.TrimSpace(in.Restart),
+		Restart: strings.TrimSpace(in.Restart), Manual: in.Manual,
 	}
 }
 

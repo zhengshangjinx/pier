@@ -85,6 +85,9 @@ type ServiceOut struct {
 	// DependsOn 是启动顺序上的前置服务名，Restart 是重启策略，原样回传供编辑表单预填。
 	DependsOn []string `json:"dependsOn"`
 	Restart   string   `json:"restart"`
+	// Manual 表示它不参与全部启停。列表上据此挂一个标记：这一行是「全部启动」
+	// 按下去也不会起来的那几个之一，不标出来就只能靠用户记得自己标过。
+	Manual bool `json:"manual"`
 	// RestartNote 说明这个服务最近被自动重启过几次，没发生过则为空。
 	//
 	// 有它才看得出「它自己崩过又起来了」：不然界面只显示一个正常的「运行中」，
@@ -305,6 +308,7 @@ func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr 
 			Runtimes:     runtimesOf(sup, svc),
 			DependsOn:    svc.DependsOn,
 			Restart:      svc.Restart,
+			Manual:       svc.Manual,
 			RestartNote:  noteText(note, svc.Name),
 			Editable:     cfg.IsStore(),
 			Occupant:     st.Occupant,

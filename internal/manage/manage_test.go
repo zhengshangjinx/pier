@@ -1341,3 +1341,35 @@ func TestAdoptPortNeedsConfig(t *testing.T) {
 		t.Errorf("err = %v，想要 ErrNoConfig", err)
 	}
 }
+
+// manual 这一项要能从表单走到盘上再读回来。
+//
+// 界面上那颗开关发的是 JSON，落到清单是 YAML，中间还过一道 toService——
+// 任何一环漏了，用户看到的现象是「勾了、保存了、下次打开又是没勾」，
+// 而三个地方看上去都没错。
+func TestSaveServiceRoundTripsManual(t *testing.T) {
+	h := newHarness(t)
+
+	if _, err := h.m.SaveService(ServiceIn{Name: "mock", Dir: "m", Kind: "go", Manual: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !h.svc("mock").Manual {
+		t.Error("保存时勾了「不参与全部启停」，读回来是没勾")
+	}
+
+	// 关掉要真的关掉：落盘的清单里不该留着一个 manual: false。
+	in := ServiceIn{Name: "mock", Dir: "m", Kind: "go"}
+	if _, err := h.m.SaveService(in); err != nil {
+		t.Fatal(err)
+	}
+	if h.svc("mock").Manual {
+		t.Error("取消勾选之后读回来还开着")
+	}
+	raw, err := os.ReadFile(h.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "manual") {
+		t.Errorf("关掉之后清单里不该还留着这一项：\n%s", raw)
+	}
+}

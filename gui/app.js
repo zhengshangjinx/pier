@@ -246,8 +246,9 @@
         // 出事的服务下面那一句诊断（原因 + 下一步 + 命中的原文），由后端从日志尾部
         // 认出来。认不出来时是 null——宁可不说，也不能猜（见 internal/diag）。
         diag: null,
-        // 依赖与重启：默认没有前置、不自动重启，需要演的那几条各自覆盖。
-        dependsOn: [], restart: "", restartNote: "",
+        // 依赖、重启与「全部」：默认没有前置、不自动重启、算在「全部」里，
+        // 需要演的那几条各自覆盖。
+        dependsOn: [], restart: "", restartNote: "", manual: false,
         runtimes: [DEMO_GO],
         usage: { cpu: 0, memBytes: 0, procs: 0 }
       }, o);
@@ -351,8 +352,12 @@
           note: "健康探针未通过：地址可能不对，或这个服务没有健康接口",
           runtimes: [DEMO_PY],
           usage: { cpu: 0.2, memBytes: 134217728, procs: 2 } }),
+        // 这一条演「不参与全部启停」：它挂着标记，说明位写着那句话，
+        // 按「全部启动」不会起它。整份演示数据里只有它一个标了，
+        // 概览那句「1 个跳过全部」也才有个来处。
         mk({ name: "mock-vod", kind: "python", port: 47832, group: "模拟服务",
-          runtimes: [DEMO_PY] })
+          manual: true, runtimes: [DEMO_PY],
+          note: "不参与全部启停，点了名才起" })
       ]
     };
   }
@@ -1334,12 +1339,24 @@
     ];
     var flagged = list.filter(needsAttention).map(function (x) { return x.name; });
 
+    // 「全部启动」按下去会跳过标了「不参与全部启停」的那几个，而这件事在屏幕上
+    // 没有别的地方写着——按了少起几个，看着像漏了。概览是唯一一处说「这份清单
+    // 一共有多少服务」的地方，就在这儿补一句；没有这样的服务时一个字都不加。
+    //
+    // 用词跟着行上那颗标记走（「跳过全部」）：这一格是四分之一宽、单行省略号，
+    // 写全「1 个不参与全部启停」在状态最多的时候正好被切掉半个字，
+    // 而切掉的那半句恰恰是「哪些不参与」。
+    var manualCount = list.filter(function (x) { return x.manual; }).length;
+    var subText = bar.filter(function (b) { return b.v > 0; }).map(function (b) {
+      return b.v + " " + b.label;
+    });
+    if (manualCount) subText.push(manualCount + " 个跳过全部");
+
     return html`<div className="dc-overview">
       <div className="dc-stats">
         <${Stat} icon=${IconLayers} label="服务状态" value=${c.running + c.starting}
           unit=${"/ " + list.length + " 在跑"}
-          sub=${bar.filter(function (b) { return b.v > 0; }).map(function (b) {
-            return b.v + " " + b.label; }).join(" · ") || "全部未启动"}>
+          sub=${subText.join(" · ") || "全部未启动"}>
           <div className="dc-bar" style=${{ background: token.colorFillSecondary }}>
             ${bar.map(function (b) {
               return b.v ? html`<span key=${b.k}
@@ -1555,6 +1572,15 @@
             <span className="dc-kind" style=${{ fontSize: token.fontSizeSM,
               color: token.colorTextSecondary, background: token.colorFillTertiary }}>
               ${KIND_LABEL[s.kind] || s.kind}</span>
+            ${"" /* 不参与全部启停的那几个挂一颗标记。停着的时候后端那句说明里
+                   也写着同一件事（见 view.NoteText），但它只在停着时出现——
+                   而「全部停止」按下去它还在跑，正是最需要一句话解释的时候。
+                   颜色比类型标签再弱一档：它说的是这颗开关的状态，不是这个服务是什么。 */}
+            ${s.manual ? html`<span className="dc-kind"
+              title="不参与「全部启动 / 全部停止」：点名或按分组时照常启停"
+              style=${{ fontSize: token.fontSizeSM,
+                color: token.colorTextTertiary, background: token.colorFillQuaternary }}>
+              跳过全部</span>` : null}
             ${rtText ? html`<span className="dc-runtime" title=${rtTip}
               style=${{ fontSize: token.fontSizeSM,
                 color: rtWarn ? token.colorWarning : token.colorTextTertiary }}>
@@ -1966,7 +1992,7 @@
   var EMPTY_FORM = {
     name: "", dir: "", group: undefined, kind: undefined, run: "", build: "",
     module: "", script: "", port: null, health: "", note: "", env: "",
-    dependsOn: [], restart: undefined
+    dependsOn: [], restart: undefined, manual: false
   };
 
   // 环境变量在表单里是多行文本（一行一个 KEY=VALUE），存的时候是对象。
@@ -2149,7 +2175,10 @@
         env: envToText(editing.env),
         // 依赖与重启也要回填。不回填的话，编辑一个配了前置的服务时那两个下拉是空的，
         // 看着像「没配」，一保存就真把它清掉了——和上面那几栏是同一个坑。
-        dependsOn: editing.dependsOn || [], restart: editing.restart || undefined
+        // 「不参与全部启停」那颗开关同理：不回填的话，编辑一次就把它关掉了，
+        // 而那次编辑多半只是改了个端口。
+        dependsOn: editing.dependsOn || [], restart: editing.restart || undefined,
+        manual: !!editing.manual
       } : Object.assign({}, EMPTY_FORM, { group: props.defaultGroup || undefined }));
       // 依赖项只认端口号这个数。写成整个 adopt 对象的话，上层每 2 秒刷一次状态都会
       // 换一个新对象，这一处预填就会跟着重跑一遍——用户刚改好的那几栏会被抹回原样。
@@ -2572,14 +2601,14 @@
           ${previewBlock()}
         </section>
 
-        ${"" /* 跨服务的两件事：谁先起来、它自己退出之后要不要再拉起来。都不影响这个
-               服务怎么跑，但一个管「全部启动」的次序，一个管进程意外退出之后要不要
-               管——按类型分家的那张表放不下它们，塞进「高级设置」又会把那句
-               「留空按类型自动推断」的说明搅浑。 */}
+        ${"" /* 跨服务的三件事：谁先起来、它自己退出之后要不要再拉起来、按「全部启动」
+               的时候算不算它一份。都不影响这个服务怎么跑，但一个管次序，一个管进程
+               意外退出之后要不要管，一个管成批启停的名单——按类型分家的那张表放不下
+               它们，塞进「高级设置」又会把那句「留空按类型自动推断」的说明搅浑。 */}
         <section className="dc-card">
           <div className="dc-card-head">
-            <span className="dc-card-title">依赖与重启</span>
-            <span className="dc-card-sub">留空表示不依赖谁、退出后也不自动重启</span>
+            <span className="dc-card-title">依赖、重启与「全部」</span>
+            <span className="dc-card-sub">留空表示不依赖谁、退出后也不自动重启、算在「全部」里</span>
           </div>
           <${TwoCol}>
             ${"" /* 只列清单里已有的服务，不给自由输入：写错一个名字的后果是这份清单
@@ -2598,6 +2627,15 @@
               <${A.Select} allowClear placeholder="不自动重启"
                 options=${[{ value: "on-failure", label: "失败时自动重启" }]}/>
             <//>
+          <//>
+          ${"" /* 清单里躺着几个平时不用、又扔不掉的服务（mock、抓包、只在前端调试时
+                   用的那一套）是常态，而「全部启动」是每天都要按的那一下。开关摆在
+                   这里、与上面两栏同处一张卡片，是因为它也是跨服务的：它改的是「全部」
+                   这份名单，不是这个服务自己怎么跑。
+                   两边都写着字：光一个拨杆说不清「开」那边是参与还是跳过。 */}
+          <${A.Form.Item} name="manual" label="全部启停" valuePropName="checked"
+            extra="打开后，界面上的「全部启动 / 全部停止」和命令行的 pier up / pier down（都不带名字时）都会跳过它；点名或用分组时照常启停。">
+            <${A.Switch} checkedChildren="跳过" unCheckedChildren="参与"/>
           <//>
         </section>
 
@@ -4323,6 +4361,13 @@
     // null 表示「全部」，交给后端的 startAll / stopAll。
     var headBatch = selected === "all" ? null : inGroup(selected);
     var headBatchLabel = selected === "all" ? "全部服务" : "「" + selected + "」的服务";
+    // 「全部启动」这一颗按下去到底会起几个：名字里写着「全部」，而清单里
+    // 标了「不参与全部启停」的那几个不会动。数字摆在按钮的悬停说明上——
+    // 按之前就能看见，也不占顶栏那一排的地方。没有跳过的时候一个字都不加。
+    var bulkSkipped = services.filter(function (s) { return s.manual; }).length;
+    var bulkTip = bulkSkipped
+      ? "「全部」算的是 " + (services.length - bulkSkipped) + " 个服务；另有 "
+        + bulkSkipped + " 个标了「跳过全部」" : null;
     // 概览里「服务占用」那一格的数：全部服务页取后端加好的合计，分组页取这个分组的。
     //
     // 筛选之后只能自己把筛出来的那几个加起来：后端的合计是整个页面的，
@@ -4366,9 +4411,12 @@
       if (kind === "start") { fire(); return; }
       // 停止会打断正在编译或正在跑的服务，先问一句——与删除、清空同一个规格。
       // 这一句里的数字取当前状态，不另做一次后端查询。
-      var live = (list || services).filter(function (s) {
-        return s.running || s.statusKey === "starting";
-      }).length;
+      //
+      // 数的是真会被停掉的那些：全部停止（list 为 null）走的是后端那份
+      // 「参与全部启停」的名单，标了「不参与」的服务根本不在里头，把它们算进来
+      // 会报出一个比实际大的数字，用户对着它去找「到底停的是谁」。
+      var live = (list || services.filter(function (s) { return !s.manual; }))
+        .filter(function (s) { return s.running || s.statusKey === "starting"; }).length;
       msg.modal.confirm({
         title: "停止" + label + "？",
         content: live
@@ -4604,9 +4652,9 @@
                      服务一起停掉；文案也一并跟着改，按钮上说的就是它真会做的事。 */}
               <${A.Space.Compact}>
                 ${headBatch === null ? html`<${React.Fragment}>
-                  <${A.Button} icon=${e(IconPlay)}
+                  <${A.Button} icon=${e(IconPlay)} title=${bulkTip}
                     onClick=${function () { runBatch("start", null, headBatchLabel); }}>全部启动<//>
-                  <${A.Button} icon=${e(IconStop)}
+                  <${A.Button} icon=${e(IconStop)} title=${bulkTip}
                     onClick=${function () { runBatch("stop", null, headBatchLabel); }}>全部停止<//>
                 <//>` : html`<${React.Fragment}>
                   <${A.Button} icon=${e(IconPlay)} disabled=${!headBatch.length}

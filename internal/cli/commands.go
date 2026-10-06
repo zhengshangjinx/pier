@@ -55,18 +55,51 @@ func setup(cfgPath string) (*config.Config, *proc.Supervisor, error) {
 	return cfg, proc.New(cfg), nil
 }
 
-// pickServices 按名字挑选服务；没有给名字则表示全部。
-func pickServices(cfg *config.Config, names []string) ([]*config.Service, error) {
+// pickServices 按名字挑选服务；没有给名字则表示「全部」，见下。
+//
+// 名字前面带 @ 的按分组挑：`pier up @前端` 起的就是界面上「前端」那一页里的全部服务。
+// 包括标了 manual 的那些——分组是一份点名点到具体几个服务的名单，
+// 而 manual 说的是「别在全部里带上我」，两件事不冲突。
+//
+// 没有给名字时给的是「全部启停」那一批（config.Bulk）：标了 manual 的不在其中，
+// 顺序则按依赖排好。界面上那颗按钮走的是同一份定义、同一个顺序，命令行这边不能
+// 一边少几个、一边又按别的次序起——`depends_on` 写在清单里，承诺的就是启动顺着依赖、
+// 停止反着来，而这两条以前只有界面兑现了。
+func pickServices(cfg *config.Config, names []string, stop bool) ([]*config.Service, error) {
 	if len(names) == 0 {
-		return cfg.Services, nil
+		if stop {
+			return config.Bulk(cfg.StopOrder()), nil
+		}
+		return config.Bulk(cfg.StartOrder()), nil
 	}
 	out := make([]*config.Service, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	add := func(svc *config.Service) {
+		if seen[svc.Name] {
+			return
+		}
+		seen[svc.Name] = true
+		out = append(out, svc)
+	}
 	for _, n := range names {
+		// 正好有个服务就叫 @前端 时按服务算：那是一条写进清单里的名字，
+		// 比分组这个说法更具体。一个符号有两种解法时，让更具体的那种赢。
 		svc, err := cfg.Find(n)
-		if err != nil {
+		if err == nil {
+			add(svc)
+			continue
+		}
+		g, ok := strings.CutPrefix(n, "@")
+		if !ok {
 			return nil, err
 		}
-		out = append(out, svc)
+		svcs := cfg.InGroup(g)
+		if len(svcs) == 0 {
+			return nil, fmt.Errorf("没有名为 %s 的分组（现有分组：%s）", g, strings.Join(cfg.AllGroups(), "、"))
+		}
+		for _, svc := range svcs {
+			add(svc)
+		}
 	}
 	return out, nil
 }
@@ -154,7 +187,7 @@ func upServices(cfgPath string, names []string, swap portSwap, resume map[string
 	if err != nil {
 		return fail("%v", err)
 	}
-	targets, err := pickServices(cfg, names)
+	targets, err := pickServices(cfg, names, false)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -261,7 +294,7 @@ func cmdDown(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	targets, err := pickServices(cfg, rest)
+	targets, err := pickServices(cfg, rest, true)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -325,7 +358,7 @@ func resumePorts(cfgPath string, names []string) map[string]int {
 	if err != nil || len(state.Services) == 0 {
 		return nil
 	}
-	targets, err := pickServices(cfg, names)
+	targets, err := pickServices(cfg, names, false)
 	if err != nil {
 		return nil
 	}

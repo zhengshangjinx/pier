@@ -80,6 +80,16 @@ type Service struct {
 	// 因此版本必须能按服务指定，不能只留一个全局值。
 	Toolchain map[string]string `yaml:"toolchain" json:"toolchain,omitempty"`
 
+	// Manual 表示这个服务不参与「全部启动 / 全部停止」，点了名才启停。
+	//
+	// 清单里躺着几个平时不用、但扔不掉的服务（mock、抓包、只在前端调试时用的那一套）
+	// 是常态，而「全部启动」是每天都要按的那一下。把这几个标记出来，用户就不必
+	// 每次手工把它们摘出去，也不必为了躲开它们而不按那一下。
+	//
+	// 启动与停止对称地排除：只排除启动的话，pier restart（先停后起）会把它们停掉
+	// 却不再拉起来，界面上看着一切正常，服务却少了一个。停止那半边留在「点名」
+	// 与分组上——想让它们停，单点那一个，或者停它所在的那一组。
+	Manual bool `yaml:"manual" json:"manual,omitempty"`
 	// DependsOn 是启动顺序上的前置服务名：它们先起来，本服务才轮到。
 	//
 	// 只影响顺序，不改变「能不能起」：前置起失败了本服务照样会起。
@@ -557,15 +567,44 @@ func (c *Config) AllGroups() []string {
 	return out
 }
 
-// CountInGroup 返回某个分组下的服务数。
-func (c *Config) CountInGroup(group string) int {
-	n := 0
+// InGroup 返回某个分组下的服务，顺序与清单一致。
+//
+// 分组名按展示用的那个比（GroupName）：`@未分组` 挑到的是没写 group 的那些，
+// 与界面上那一页对着的是同一份名单。
+func (c *Config) InGroup(group string) []*Service {
+	var out []*Service
 	for _, s := range c.Services {
 		if s.GroupName() == group {
-			n++
+			out = append(out, s)
 		}
 	}
-	return n
+	return out
+}
+
+// CountInGroup 返回某个分组下的服务数。
+func (c *Config) CountInGroup(group string) int { return len(c.InGroup(group)) }
+
+// Bulk 从一批服务里挑出「全部启停」该作用到的那些：标了 Manual 的不在其中。
+//
+// 这是「全部」的唯一一份定义：界面上的全部启动 / 全部停止与命令行的 pier up /
+// pier down（都不带名字）都从这里过一道——各写一份筛选的话，界面上按了没起、
+// 命令行起了没停，同一个词在两处说两件事，而用户只看得见其中一处。
+//
+// 终端面板那一屏（cli 的 a / x）不走这里：它手上是一份状态而不是清单，
+// 跳过的那几个要连同原因一起说给人听，所以那里直接读 Service.Manual 这一个字段
+// ——判定还是同一个，没有第二份。
+//
+// 传进来的顺序原样保留：调用方给的是排好的顺序（StartOrder / StopOrder），
+// 这里只摘掉几个，不重排。
+func Bulk(svcs []*Service) []*Service {
+	out := make([]*Service, 0, len(svcs))
+	for _, s := range svcs {
+		if s.Manual {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // RelTo 把绝对路径写成相对清单目录的形式，写进覆盖文件时才不会把

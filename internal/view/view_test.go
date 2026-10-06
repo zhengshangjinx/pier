@@ -81,6 +81,16 @@ func TestNoteText(t *testing.T) {
 			running(func(s *proc.Status) { s.HasHealth, s.ProbeExpired = true, true }),
 			"健康探针未通过：地址可能不对，或这个服务没有健康接口"},
 		{"一切正常时报健康地址", health, "http://localhost:8080/health"},
+		// 不参与全部启停的那几个：停着的时候要说一句，否则「按了全部启动它没起来」
+		// 看着就像漏了——这一排里没有别的地方写着它为什么不动。
+		{"停着的手动服务",
+			proc.Status{Service: &config.Service{Name: "mock", Manual: true}},
+			"不参与全部启停，点了名才起"},
+		// 跑起来之后这句就撤了：它已经起来了，「点了名才起」是一句无用的解释，
+		// 而说明位要留给探针地址这些还看得见的东西。
+		{"跑着的手动服务不再解释这件事",
+			running(func(s *proc.Status) { s.Service.Manual = true }),
+			""},
 	}
 	for _, c := range cases {
 		if got := NoteText(c.st); got != c.want {

@@ -250,6 +250,7 @@ const openAPISpec = `{
           "runtimes": { "type": "array", "items": { "type": "object" }, "description": "启动时实际会用的 SDK 与选择依据，与真正启动走的是同一份解析结果。" },
           "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "启动顺序上的前置服务名。启动时它们会先排进队列。" },
           "restart": { "type": "string", "description": "重启策略，目前只有 on-failure：不是 Pier 叫它停的，就再起一次。留空不重启。" },
+          "manual": { "type": "boolean", "description": "为真表示它不参与全部启停：「全部启动 / 全部停止」（界面上的按钮、pier up 与 pier down 不带名字时的那个「全部」）都会跳开它，点名时照做。" },
           "restartNote": { "type": "string", "description": "最近几次自动重启的说明，没发生过则为空。" },
           "editable": { "type": "boolean", "description": "为真表示这条定义在 Pier 自己的数据文件里，能改也能删；命令行指定 YAML 清单时为假。" },
           "occupant": { "type": "object", "description": "占着该端口的进程。端口开着又不是 Pier 起的时，直接说出「被谁占着」。字段见界面里的端口占用详情。", "additionalProperties": true },

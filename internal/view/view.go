@@ -140,6 +140,11 @@ func NoteText(st proc.Status) string {
 		// 用探针那一份的地址：换过端口的话，端口变了地址也跟着变了。
 		return st.RunHealth()
 	default:
+		// 停着的服务平时没有话要说，不参与全部启停的那几个除外：它们是这一排里
+		// 唯一一批「按了全部启动也不会起来」的，不说一句，看着就像漏了。
+		if st.Service != nil && st.Service.Manual {
+			return "不参与全部启停，点了名才起"
+		}
 		return ""
 	}
 }

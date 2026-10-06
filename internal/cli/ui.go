@@ -589,6 +589,10 @@ func (m uiModel) startAll() (tea.Model, tea.Cmd) {
 			skipped = append(skipped, name+"(已在运行)")
 		case st.PortOpen:
 			skipped = append(skipped, fmt.Sprintf("%s(端口 %d 被占用)", name, st.Service.Port))
+		case st.Service.Manual:
+			// 跳过就说出来。这一屏上没有别的地方写着它不参与全部启动，
+			// 不说的话，「a」按下去少了一个，看着像漏了。
+			skipped = append(skipped, name+"(不参与全部启停)")
 		default:
 			jobs = append(jobs, uiJob{act: uiActStart, svc: st.Service})
 		}
@@ -616,6 +620,10 @@ func (m uiModel) stopAll() (tea.Model, tea.Cmd) {
 		switch {
 		case st.Running && m.pending(name):
 			skipped = append(skipped, name+"(处理中)")
+		// 与全部启动同一份名单：只排除启动的话，这里「x 停止全部」之后再「a 全部启动」，
+		// 少的就是同一批服务，而且是在它没跑的时候才看得出来。
+		case st.Running && st.Service.Manual:
+			skipped = append(skipped, name+"(不参与全部启停)")
 		case st.Running:
 			jobs = append(jobs, uiJob{act: uiActStop, svc: st.Service})
 		case st.PortOpen:

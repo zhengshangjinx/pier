@@ -61,6 +61,13 @@ process group.
   it, and a dependency cycle is reported while loading the manifest instead of being left to the
   sort; `restart: on-failure` means "it disappeared without going through Stop, so bring it back",
   capped at three times in ten minutes, with the panel saying how many restarts there have been.
+- Services you rarely need can be marked `manual: true` ("All start/stop → Skip" in the form):
+  a bare `pier up` / `pier down`, and the panel's "Start all / Stop all", leave them alone —
+  naming them or starting their group still reaches them. Manifests tend to carry a few mock,
+  capture or frontend-only services you would otherwise have to pick out by hand every time.
+- Groups are not just a panel concept: `pier up @frontend` starts exactly what the frontend page
+  shows (`@Ungrouped` works too). A group is an explicit list of services, so it includes the
+  ones marked `manual`.
 - "Who holds this port" is resolved by **process group**, not by PID alone: the port is usually
   held by a child process, and comparing PIDs alone points at the wrong thing.
 - Resource usage counts only Pier and the services it started (summed per process group), never the
@@ -175,6 +182,9 @@ process group.
   replaced by a primary-coloured dot and the new version number when an update exists.
 - Reorder services by dragging, rename them (log directory moves along), duplicate one to edit.
 - Search and an "all / running / needs attention" filter; bulk start/stop follows the current page.
+  Services you seldom need can be flipped to "All start/stop → Skip" in the form; they carry a
+  "skipped" tag in the list, "Start all / Stop all" leaves them alone, and the overview says how
+  many there are.
 - Log drawer, port occupancy (who holds it, kill it from there), and a defined way out when a
   health probe never passes.
 - Preferences has three sections: general (check / download / skip, the automatic-check and
@@ -280,8 +290,9 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 2. Run them:
 
    ```bash
-   pier up              # everything
+   pier up              # everything (skips the ones marked manual)
    pier up api web      # just these two
+   pier up @frontend    # one group, matching its page in the panel
    pier status
    pier logs api -f
    pier down
@@ -301,7 +312,7 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier doctor` | Check that each language toolchain resolves, and report which one was chosen and why |
 | `pier detect [dir]` | Scan a directory, identify project types and suggest start commands |
 | `pier import [dir]` | Read `.idea` run configurations and convert them into Pier services |
-| `pier up [service...]` | Start services (all of them when no name is given); `--port 0` starts the named one on another port, this run only |
+| `pier up [service...]` | Start services; no name means "all" (skipping the ones marked `manual`), and an `@` prefix starts a group; `--port 0` starts the named one on another port, this run only |
 | `pier down [service...]` | Stop services |
 | `pier restart [service...]` | Restart services |
 | `pier wait <service...>` | Wait until those services are ready (`--timeout 30s`, default 180s) |
@@ -337,9 +348,10 @@ so `pier status --json | jq` always works.
 | 2 | Unknown command (usually a typo) |
 | 10 | `pier update --check` only: a newer release exists |
 
-For `pier up`, 0 means **every service in the manifest is running**: services skipped because
+For `pier up`, 0 means **every service this run was asked to start is running**: services skipped because
 their port was taken do not count as success and are listed in their own section at the end
-(add `--port 0` for that service to start it on a free port instead).
+(add `--port 0` for that service to start it on a free port instead). Services marked
+`manual: true` are not counted — a bare `pier up` is not supposed to touch them in the first place.
 `pier down` is the one exception — "not started by Pier" and "already exited" are notices with
 exit code 0, since running `down` twice is supposed to be safe. `pier doctor` always exits 0:
 a missing toolchain only affects the services that need it, so a script that wants to judge
@@ -380,6 +392,9 @@ services:
     group: frontend
     depends_on: [api]        # api starts first, and stops last
     restart: on-failure      # bring it back when it disappears without going through Stop
+  - name: mock
+    dir: ./mock
+    manual: true             # out of "all start/stop"; named or grouped starts still reach it
 ```
 
 The two top-level keys apply to every service: `toolchain` sets a global default per language,
@@ -401,6 +416,7 @@ The two top-level keys apply to every service: `toolchain` sets a global default
 | `toolchain` | Per-service toolchain override, taking precedence over the top level |
 | `depends_on` | Services that must start first (a list). Ordering only, never a verdict: a service still starts when its dependency failed |
 | `restart` | Takes one value, `on-failure`: bring the process back when it disappears without going through Stop. Empty means no automatic restart |
+| `manual` | True keeps it out of "all start/stop": a bare `pier up` / `pier down`, and the panel's "Start all / Stop all", skip it; naming it or starting its group still reaches it. Start and stop are symmetric — excluding only the start side would let `pier restart` stop it and never bring it back |
 
 Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=true -Djib.skip=true`
 — local runs don't build images.
