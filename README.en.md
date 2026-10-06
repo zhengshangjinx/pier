@@ -61,6 +61,12 @@ process group.
   it, and a dependency cycle is reported while loading the manifest instead of being left to the
   sort; `restart: on-failure` means "it disappeared without going through Stop, so bring it back",
   capped at three times in ten minutes, with the panel saying how many restarts there have been.
+- Dependencies can carry a condition: `depends_on: [mysql:healthy]` holds this service back until
+  mysql's probe passes. It still starts when that never happens — the state says
+  "mysql never became ready", which never blocks anything else. Bare names only order the start.
+- Readiness probes come in three forms: an HTTP address, `tcp://host:port` (for databases, caches
+  and queues that have no HTTP interface), and `cmd: <command>` (exit code 0 means ready).
+  A probe is a **readiness signal, not a verdict**: a service that never answers it still runs.
 - Services you rarely need can be marked `manual: true` ("All start/stop → Skip" in the form):
   a bare `pier up` / `pier down`, and the panel's "Start all / Stop all", leave them alone —
   naming them or starting their group still reaches them. Manifests tend to carry a few mock,
@@ -390,7 +396,7 @@ services:
     script: dev              # package.json script, default "dev"
     port: 5173
     group: frontend
-    depends_on: [api]        # api starts first, and stops last
+    depends_on: [api:healthy] # wait for api's probe; a bare name only orders the start
     restart: on-failure      # bring it back when it disappears without going through Stop
   - name: mock
     dir: ./mock
@@ -411,12 +417,29 @@ The two top-level keys apply to every service: `toolchain` sets a global default
 | `module` | Maven submodule for Java services |
 | `script` | package.json script for Node services |
 | `port` | Port, used for status display and occupancy checks |
-| `health` | Readiness probe URL. It is a **readiness signal, not a verdict**: a service that never answers it is still running, and the state falls back with an explanation once the probe times out |
+| `health` | Readiness probe, in one of three forms (below). It is a **readiness signal, not a verdict**: a service that never answers it is still running, and the state falls back with an explanation once the probe times out |
 | `env` | Extra environment variables. Values may use `${NAME}` (from the environment as computed so far, including `.env` and the shared block) and `${PORT}` (this service's own port); an unknown name refuses the start instead of expanding to nothing |
 | `toolchain` | Per-service toolchain override, taking precedence over the top level |
-| `depends_on` | Services that must start first (a list). Ordering only, never a verdict: a service still starts when its dependency failed |
+| `depends_on` | Services that must come first (a list). A bare name orders the start only: it starts first and stops last, and a service still starts when its dependency failed. `name:healthy` also waits, see below |
 | `restart` | Takes one value, `on-failure`: bring the process back when it disappears without going through Stop. Empty means no automatic restart |
 | `manual` | True keeps it out of "all start/stop": a bare `pier up` / `pier down`, and the panel's "Start all / Stop all", skip it; naming it or starting its group still reaches it. Start and stop are symmetric — excluding only the start side would let `pier restart` stop it and never bring it back |
+
+The three forms of `health`:
+
+- `http://localhost:8080/actuator/health` — a GET; 2xx / 3xx means ready (`https` works the same).
+- `tcp://localhost:3306` — the connection succeeds. Databases, caches, registries and queues have
+  no HTTP interface, and "can it be connected to yet" is exactly what you want to know locally.
+- `cmd: pg_isready -h localhost` — a command; exit code 0 means ready. `redis-cli ping` or a small
+  script of your own both work. The command goes through the system shell (like `run`, so pipes and
+  `&&` are fine), runs in the service's `dir`, and its output is discarded.
+
+A condition in `depends_on` (`name:healthy`) waits for that dependency's probe before starting this
+service's process, for up to three minutes. Writing a condition requires the dependency to have a
+`health` (there would be nothing to probe), otherwise loading the manifest fails. **Not becoming
+ready never blocks the start**: the service comes up anyway, the state says "mysql never became
+ready", and `pier up` lists it in its own closing section — it is already running, and sitting
+there doing nothing is harder to explain than starting and saying so. Waiting does not hold up the
+pipeline either: services queued behind a waiting one still start.
 
 Java builds always pass `-DskipDocker=true -Ddocker.skip=true -Ddockerfile.skip=true -Djib.skip=true`
 — local runs don't build images.

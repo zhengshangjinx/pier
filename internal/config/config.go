@@ -71,7 +71,8 @@ type Service struct {
 	Script string `yaml:"script" json:"script,omitempty"`
 	// Port 是该服务监听的端口，用于状态展示与占用检测；可选。
 	Port int `yaml:"port" json:"port,omitempty"`
-	// Health 是就绪探针 URL，如 http://localhost:20351/admin/health；可选。
+	// Health 是就绪探针，三种写法见 config.ParseProbe（http(s) 地址、tcp://host:port、
+	// cmd: 一条命令）；可选，留空表示这类服务只看进程是否存活。
 	Health string `yaml:"health" json:"health,omitempty"`
 	// Env 是追加到进程环境的变量，优先级高于继承来的环境。
 	Env map[string]string `yaml:"env" json:"env,omitempty"`
@@ -91,11 +92,18 @@ type Service struct {
 	// 与分组上——想让它们停，单点那一个，或者停它所在的那一组。
 	Manual bool `yaml:"manual" json:"manual,omitempty"`
 	// DependsOn 是启动顺序上的前置服务名：它们先起来，本服务才轮到。
+	// 可以带条件，写成「名字:条件」，目前只认一个条件 healthy（见 CondHealthy）：
+	// `depends_on: [mysql:healthy]` 就是「等 mysql 的探针通过再起我」。
 	//
-	// 只影响顺序，不改变「能不能起」：前置起失败了本服务照样会起。
+	// 不带条件时只影响顺序，不改变「能不能起」：前置起失败了本服务照样会起。
 	// 这里不做编排——一个本地启停工具替用户判断「依赖没好就别起了」，
 	// 在真实项目里只会让人更费解（前置的健康检查没过、端口还没通，
 	// 而服务本身其实完全起得来）。顺序是确定的收益，判定不是。
+	//
+	// 带条件的才等，等不到也照起（把「依赖 X 没等到」写在状态里）：
+	// 等待会占住启动队列，全都等的话一个慢服务就压住了后面每一个，
+	// 所以这件事必须由用户一条一条点明；而等不到就拦下启动，等于替用户
+	// 判了一个他自己更清楚的案子——服务往往能自己重连上去。
 	DependsOn []string `yaml:"depends_on" json:"depends_on,omitempty"`
 	// Restart 是进程意外退出后的重启策略，取值见 RestartOnFailure；留空不重启。
 	Restart string `yaml:"restart" json:"restart,omitempty"`
@@ -237,6 +245,9 @@ func (c *Config) validate() error {
 // validateServices 逐条检查服务定义。和 validate 分开，是因为数据文件允许一个服务都没有。
 func (c *Config) validateServices() error {
 	seen := make(map[string]bool, len(c.Services))
+	// byName 是同一个 seen 的另一面：下面查依赖的条件时，光知道「有这个名字」
+	// 不够，还要问它配没配探针。
+	byName := make(map[string]*Service, len(c.Services))
 	for i, s := range c.Services {
 		if s == nil {
 			return fmt.Errorf("第 %d 个服务定义为空", i+1)
@@ -248,6 +259,7 @@ func (c *Config) validateServices() error {
 			return fmt.Errorf("服务名重复：%s", s.Name)
 		}
 		seen[s.Name] = true
+		byName[s.Name] = s
 
 		if strings.TrimSpace(s.Dir) == "" {
 			return fmt.Errorf("服务 %s 缺少 dir", s.Name)
@@ -269,8 +281,12 @@ func (c *Config) validateServices() error {
 			return fmt.Errorf("服务 %s 的 health %s", s.Name, msg)
 		}
 		for _, d := range s.DependsOn {
-			if strings.TrimSpace(d) == "" {
+			if DepName(d) == "" {
 				return fmt.Errorf("服务 %s 的 depends_on 里有空名字", s.Name)
+			}
+			if cond := DepCond(d); cond != "" && cond != CondHealthy {
+				return fmt.Errorf("服务 %s 的 depends_on 里 %s 这个条件不认识：只认 %s，写成 %s:healthy 表示等它的探针通过",
+					s.Name, cond, CondHealthy, DepName(d))
 			}
 		}
 	}
@@ -279,11 +295,20 @@ func (c *Config) validateServices() error {
 	// 边读边查会把「顺序不同」误报成「名字不存在」。
 	for _, s := range c.Services {
 		for _, d := range s.DependsOn {
-			if d == s.Name {
+			name := DepName(d)
+			if name == s.Name {
 				return fmt.Errorf("服务 %s 依赖了自己", s.Name)
 			}
-			if !seen[d] {
-				return fmt.Errorf("服务 %s 依赖的 %s 不在清单里", s.Name, d)
+			if !seen[name] {
+				return fmt.Errorf("服务 %s 依赖的 %s 不在清单里", s.Name, name)
+			}
+			// 条件要等的是一个探针，而被等的那个没有探针：这一条现在收下的话，
+			// 启动时会白等满一整个窗口，然后落一句「没等到」——而它从来没可能等到。
+			// 报在加载的这一刻，用户手上还攥着刚写完的那一行。
+			if DepCond(d) == CondHealthy && byName[name].Health == "" {
+				return fmt.Errorf("服务 %s 依赖 %s:healthy，但 %s 没有配 health 探针，等不到它——"+
+					"给 %s 配一个（如 tcp://localhost:3306），或者把条件去掉只排顺序",
+					s.Name, name, name, name)
 			}
 		}
 	}
@@ -298,28 +323,35 @@ func (c *Config) validateServices() error {
 // 一定得是副本：清单是用户写的，「换一个端口起」只是这一次运行的事，改到清单里
 // 那一份就写回去了——用户下次打开界面会看见端口换掉了，而他从没同意过这件事。
 //
-// 换的不只是 Port 这个数：健康探针地址里的端口也是探测目标，一并跟着换，
-// 否则探针会去探旧端口上那个陌生进程（见 withPortInURL）。
+// 换的不只是 Port 这个数：健康探针里的端口也是探测目标，一并跟着换，
+// 否则探针会去探旧端口上那个陌生进程（见 withPortInProbe）。
 func WithPort(svc *Service, port int) *Service {
 	if svc == nil || port <= 0 || port == svc.Port {
 		return svc
 	}
 	cp := *svc
-	cp.Health = withPortInURL(cp.Health, svc.Port, port)
+	cp.Health = withPortInProbe(cp.Health, svc.Port, port)
 	cp.Port = port
 	return &cp
 }
 
-// withPortInURL 把 URL 里的端口从 old 换成 new，不是这个端口就原样返回。
+// withPortInProbe 把探针里的端口从 old 换成 new，不是这个端口就原样返回。
 //
-// 健康地址大多是从端口推出来的（见 cli/detect.go），里面带着端口是常态。
+// 探针大多是从端口推出来的（见 cli/detect.go），里面带着端口是常态。
 // 不跟着换就会去探旧端口上那个陌生进程：它可能正好返回 200，于是界面写着「健康」，
 // 而这句话说的是另一个服务——比探不通更坏。
 //
 // 只认 URL 里那一段端口，不在整串上做替换：路径里出现同一个数字是常事
-// （/api/v2/8080/… 之类），按字符串替换会把它一起改掉。
-func withPortInURL(raw string, old, new int) string {
+// （/api/v2/8080/… 之类），按字符串替换会把它一起改掉。tcp:// 走的是同一条路
+// ——它也是个带端口的 URL。
+func withPortInProbe(raw string, old, new int) string {
 	if raw == "" || old <= 0 {
+		return raw
+	}
+	// cmd 探针是一条命令，里面的端口不跟着换：那是用户写的字，要换只能整串替换，
+	// 而命令里出现同一个数字的地方多了去。这类服务要换端口起，探针就得写成
+	// 不含端口的形式（去读环境变量之类），或者干脆别用 cmd。
+	if _, ok := cmdProbe(raw); ok {
 		return raw
 	}
 	u, err := url.Parse(raw)
@@ -330,45 +362,23 @@ func withPortInURL(raw string, old, new int) string {
 	return u.String()
 }
 
-// healthProblem 检查健康探针地址能不能真的用，返回一句「哪里不对」，没问题时空串。
+// healthProblem 检查健康探针能不能真的用，返回一句「哪里不对」，没问题时空串。
 // 留空是「这类服务没有健康接口」，正当，不算问题。
+//
+// 判定只有一份，在 ParseProbe 里——探针写成什么样是清单的事，而「填的时候收下、
+// 跑起来不认」是最难查的一类错：用户存下一条 Pier 自己解析不了的探针，界面写着
+// 已保存，等到启动时才发现探针永远不通过。两处各写一份判定，迟早一处收一处不收。
 //
 // 少了 scheme 的写法（localhost:8080/health）最坑：url.Parse 收得下——它把 localhost
 // 当成 scheme——于是探针每次都发不出去，服务一路挂到探针过期才被人看见，而那已经是
 // 三分钟之后的事，人不会把这两件事连起来。挡在存下来的那一刻：那时用户还知道
 // 自己想填什么。
 func healthProblem(raw string) string {
-	if raw == "" {
+	_, err := ParseProbe(raw)
+	if err == nil {
 		return ""
 	}
-	// 地址里不该有空格：存下去之后是 client.Get 直接用的，它只会回一句
-	// 「invalid character " " in host name」，而那时人已经忘了自己填过什么。
-	if strings.ContainsAny(raw, " \t\n") {
-		return "里不能有空格（空格要写成 %20）"
-	}
-	// 漏了 scheme 的两种写法是同一件事，报出来的样子却不一样：localhost:8080/health
-	// 会被 url.Parse 收下（localhost 成了 scheme），127.0.0.1:8080/health 则直接报错
-	// （冒号落在第一段路径里）——后者的原话是「first path segment in URL cannot contain
-	// colon」，对着一个在填表单的人等于没说。所以先补上 http:// 试一次，成立就按这件事说。
-	//
-	// 只对纯 ASCII 这么判：url.Parse 对中文域名照收不误，不拦一道就会建议人家
-	// 去访问 http://我的服务 ，那种「建议」比不说还乱。
-	if !strings.Contains(raw, "://") && strings.IndexFunc(raw, func(r rune) bool { return r > 127 }) < 0 {
-		if u, err := url.Parse("http://" + raw); err == nil && u.Host != "" {
-			return "要写成完整的地址，补上 http:// —— http://" + raw
-		}
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Sprintf("不是一个能用的地址：%v", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Sprintf("只认 http 与 https，这里是 %s://", u.Scheme)
-	}
-	if u.Host == "" {
-		return "里没有主机名，比如 http://localhost:8080/health"
-	}
-	return ""
+	return err.Error()
 }
 
 // dependencyCycle 找出一条依赖环并原样返回，如 [a b a]；没有环时返回 nil。
@@ -379,7 +389,7 @@ func healthProblem(raw string) string {
 func (c *Config) dependencyCycle() []string {
 	deps := make(map[string][]string, len(c.Services))
 	for _, s := range c.Services {
-		deps[s.Name] = s.DependsOn
+		deps[s.Name] = DepRefs(s.DependsOn)
 	}
 	const (
 		white = 0 // 还没走到
@@ -448,7 +458,7 @@ func (c *Config) StartOrder() []*Service {
 				continue
 			}
 			ready := true
-			for _, d := range s.DependsOn {
+			for _, d := range DepRefs(s.DependsOn) {
 				if !done[d] {
 					ready = false
 					break

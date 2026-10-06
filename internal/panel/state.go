@@ -93,6 +93,12 @@ type ServiceOut struct {
 	// 有它才看得出「它自己崩过又起来了」：不然界面只显示一个正常的「运行中」，
 	// 而日志里那几段崩溃的痕迹没有任何东西解释。
 	RestartNote string `json:"restartNote"`
+	// DepNote 说明这次启动没能等到哪个前置就绪（depends_on 里写了 :healthy 的那些）。
+	//
+	// 等不到照旧起（见 panel.waitDeps）：服务已经在跑了，卡着不动的代价比
+	// 「起了并说清楚」大得多。但这句话必须留在这儿——不然用户拿到的是一个
+	// 「运行中」的服务，而它连的是还没起来的数据库，症状会在别处冒出来。
+	DepNote string `json:"depNote"`
 	// Editable 为真表示这条定义在 Pier 自己的数据文件里，界面能改也能删；
 	// 命令行指定 YAML 清单时为假，那份文件 Pier 不改写。
 	Editable bool `json:"editable"`
@@ -206,18 +212,34 @@ func (p *Panel) State() StateOut {
 		}
 	}
 	p.mu.Unlock()
-	return Snapshot(cfg, sup, cfgPath, cfgSrc, cfgErr, ops, p.restartNote)
+	return Snapshot(cfg, sup, cfgPath, cfgSrc, cfgErr, ops, Notes{
+		Restart: p.restartNote,
+		Deps:    p.depNote,
+	})
+}
+
+// Notes 是只有面板才知道的那几句按服务说的说明。命令行没有它们（传零值），
+// 它自己就是一次前台动作，那些话在它的输出里各有各的位置。
+//
+// 收成一个结构而不是继续往 Snapshot 上挂参数：这两样是同一类东西
+// （「这次运行发生了什么」），再添一样时不必再动一次签名，
+// 也不会出现「两个 func 参数传反了」这种编译器拦不住的错。
+type Notes struct {
+	// Restart 说明这个服务最近自动重启过几次。
+	Restart func(string) string
+	// Deps 列出这次启动没等到的前置服务名，见 view.DepMissed。
+	Deps func(string) []string
 }
 
 // Snapshot 汇总一次完整快照。面板与命令行（`pier status --json`）共用这一份。
 //
 // 输入是清单、supervisor 与清单的来源说明，另加只有面板才有的两样：正在进行的
-// 动作（ops）、自动重启的说明（note）。命令行这两样都没有，传 nil。
+// 动作（ops）、那几句按服务说的说明（notes）。命令行这两样都没有，传零值。
 //
 // 分头组装是不行的：StateOut 上每一个 json 键名都是对外承诺，各写一份的话，
 // 加一个字段就会漏掉一边，而两边的消费方（界面与脚本）都会以为自己看到的是全部。
 func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr string,
-	ops map[string]OpInfo, note func(string) string) StateOut {
+	ops map[string]OpInfo, notes Notes) StateOut {
 	if cfg == nil || sup == nil {
 		return StateOut{OK: false, Error: cfgErr, ConfigPath: cfgPath, ConfigSrc: cfgSrc}
 	}
@@ -309,7 +331,8 @@ func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr 
 			DependsOn:    svc.DependsOn,
 			Restart:      svc.Restart,
 			Manual:       svc.Manual,
-			RestartNote:  noteText(note, svc.Name),
+			RestartNote:  noteText(notes.Restart, svc.Name),
+			DepNote:      view.DepMissed(depNames(notes.Deps, svc.Name)),
 			Editable:     cfg.IsStore(),
 			Occupant:     st.Occupant,
 		}
@@ -355,6 +378,15 @@ func Snapshot(cfg *config.Config, sup *proc.Supervisor, cfgPath, cfgSrc, cfgErr 
 func noteText(note func(string) string, name string) string {
 	if note == nil {
 		return ""
+	}
+	return note(name)
+}
+
+// depNames 问一句这个服务这次启动没等到哪些前置。与 noteText 分开是因为
+// 它给的是一串名字，措辞在 view.DepMissed 里统一（命令行也要说同一句话）。
+func depNames(note func(string) []string, name string) []string {
+	if note == nil {
+		return nil
 	}
 	return note(name)
 }

@@ -308,6 +308,9 @@ func (c *Config) Remove(name string) bool {
 }
 
 // dropDependencyOn 把各服务的 depends_on 里指向 name 的那一条摘掉。
+//
+// 比的是名字那一半（DepName）：写成 name:healthy 的那条也要摘掉，否则删掉一个服务
+// 之后，清单里留着一条指向不存在服务的依赖，下次启动直接判成「清单有问题」。
 func (c *Config) dropDependencyOn(name string) {
 	for _, s := range c.Services {
 		if len(s.DependsOn) == 0 {
@@ -315,7 +318,7 @@ func (c *Config) dropDependencyOn(name string) {
 		}
 		kept := s.DependsOn[:0]
 		for _, d := range s.DependsOn {
-			if d != name {
+			if DepName(d) != name {
 				kept = append(kept, d)
 			}
 		}
@@ -341,10 +344,14 @@ func (c *Config) RenameService(oldName, newName string) error {
 			s.Name = newName
 			// 别人 depends_on 里写的是旧名字，跟着一起改。不改的话这条依赖会变成
 			// 指向一个不存在的服务——改名的那个服务自己好好的，坏掉的是依赖它的那些。
+			//
+			// 只换名字那一半，条件原样留着（TrimPrefix 而不是整条替换）：写成
+			// old:healthy 的那条要变成 new:healthy，整条换成 new 的话条件就掉了，
+			// 而条件掉了的表现是「这次启动不再等它」——日志里一个字都不会有。
 			for _, o := range c.Services {
 				for i, d := range o.DependsOn {
-					if d == oldName {
-						o.DependsOn[i] = newName
+					if DepName(d) == oldName {
+						o.DependsOn[i] = newName + strings.TrimPrefix(d, oldName)
 					}
 				}
 			}

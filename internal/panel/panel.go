@@ -98,10 +98,14 @@ func newOp(kind, phase string) *operation {
 }
 
 // opLabels 把「动作 + 阶段」翻成界面文案。
+//
+// deps 是「在等前置就绪」，排在 running（已经在下拉的这一趟）之前：
+// 两者都是「启动中」，区别只在等的是什么，所以文案也要说得出这一点——
+// 写成笼统的「启动中」，用户会去翻日志找为什么这么慢，而日志里一行都没有。
 var opLabels = map[string]map[string]string{
-	"start":   {"queued": "排队启动", "running": "启动中", "waiting": "等待就绪"},
+	"start":   {"queued": "排队启动", "deps": "等待前置", "running": "启动中", "waiting": "等待就绪"},
 	"stop":    {"queued": "排队停止", "running": "停止中"},
-	"restart": {"queued": "排队重启", "running": "重启中", "waiting": "等待就绪"},
+	"restart": {"queued": "排队重启", "deps": "等待前置", "running": "重启中", "waiting": "等待就绪"},
 }
 
 // label 返回该动作当前该显示成什么。失败态不再显示动作，改由 OpErr 呈现原因。
@@ -205,6 +209,13 @@ type Panel struct {
 	// 写完之后也会触发一次重载，那条路径不经过宿主的显式调用——漏掉它，
 	// 用户改完清单、重启界面，就会回到上一份旧清单上。
 	onLoad func(path string)
+
+	// depNotes 记着每个服务上一次启动时没等到的那些前置（见 setDepNote）。
+	//
+	// 只活在内存里：它说的是「这次启动等到了没有」，而这件事跨不过一次重启——
+	// 关掉界面再打开，那些进程还是原来那些，但「它起来的时候前置在不在」已经
+	// 没有地方问得出来。重启之后不再说，比说一句不知道是什么时候的事要好。
+	depNotes map[string][]string
 }
 
 // New 建一个空面板并启动执行协程。清单要另外用 Load 装进来。
@@ -214,6 +225,7 @@ func New() *Panel {
 		jobs:     make(chan job, 256),
 		restarts: map[string][]time.Time{},
 		told:     map[string]string{},
+		depNotes: map[string][]string{},
 		done:     make(chan struct{}),
 	}
 	p.mgr = manage.New(p.Load)
@@ -425,6 +437,7 @@ func (p *Panel) Load(path string) error {
 	//
 	//   - 排队中还没开始的：撤掉。轮到它时队列里那个任务拿的还是旧定义（旧目录、
 	//     旧端口、旧命令），用新的监管器去起它，起的是一份已经不存在的东西。
+	//     等待前置的那一批同理：它也还没开始动任何东西，等的那份清单已经换了。
 	//   - 已经开始的（编译中、拉起中、等待就绪）：服务还在新清单里就让它跑完；
 	//     已经被删掉或改名的必须打断——编译完拉起来的进程会是一个界面看不见、
 	//     命令行也找不着的孤儿，只能去活动监视器手工杀。
@@ -432,7 +445,9 @@ func (p *Panel) Load(path string) error {
 	next := map[string]*operation{}
 	for name, op := range p.ops {
 		switch {
-		case op.phase == "error", op.phase == "queued" && op.kind != "stop":
+		case op.phase == "error",
+			op.phase == "queued" && op.kind != "stop",
+			op.phase == "deps" && op.kind != "stop":
 			op.cancel()
 		case op.kind == "stop":
 			next[name] = op
@@ -445,6 +460,12 @@ func (p *Panel) Load(path string) error {
 		}
 	}
 	p.ops = next
+	// 「没等到前置」说的是一份新清单里可能已经没有的服务，跟着一起清。
+	for name := range p.depNotes {
+		if _, err := cfg.Find(name); err != nil {
+			delete(p.depNotes, name)
+		}
+	}
 	p.mu.Unlock()
 
 	// 业务层跟着换到新清单上。放在解锁之后：SetConfig 拿的是它自己的锁，
@@ -520,7 +541,15 @@ func (p *Panel) worker() {
 }
 
 func (p *Panel) exec(j job) {
-	defer close(j.op.started)
+	// started 由「同步部分结束时」的那一方关闭。等前置的那条路把它交给了协程
+	// （见 startOne）：那一趟的同步部分要从等前置算起，在这里关掉的话，
+	// 「停止」会以为进程已经拉起来了，而它其实还在等——停完才被拉起来。
+	handoff := false
+	defer func() {
+		if !handoff {
+			close(j.op.started)
+		}
+	}()
 	// 排队期间被「停止」撤销了：什么都不做，状态已经交给停止那一方。
 	if j.op.ctx.Err() != nil {
 		return
@@ -547,9 +576,9 @@ func (p *Panel) exec(j job) {
 			p.fail(j.svc.Name, j.op, err)
 			return
 		}
-		p.startOne(j)
+		handoff = p.startOne(j)
 	default:
-		p.startOne(j)
+		handoff = p.startOne(j)
 	}
 }
 
@@ -764,7 +793,54 @@ func withPort(svc *config.Service, port int) *config.Service {
 //
 // 整个过程都可能被「停止」打断（ctx 被取消）：那时不写任何状态——
 // 这个服务的状态已经归停止那一方管，这里再写只会把「停止中」覆盖掉。
-func (p *Panel) startOne(j job) {
+//
+// 返回真表示这次启动被交给了一条协程（在等前置就绪），started 由它负责关。
+func (p *Panel) startOne(j job) bool {
+	svc, op := j.svc, j.op
+	p.mu.Lock()
+	sup := p.sup
+	p.mu.Unlock()
+	if sup == nil {
+		p.fail(svc.Name, op, errors.New("尚未加载服务清单"))
+		return false
+	}
+
+	// 端口已被监听说明可能已经在 IDEA 或别的终端跑着，此时再起一个必然冲突。
+	//
+	// 这一步排在等前置之前：它是当场就能知道的事，而等前置可能要几分钟。
+	// 反过来（先等再查）的代价是用户盯着「等待前置」，等完了才被告知
+	// 一件几十秒前就已经成立的事。
+	if svc.Port > 0 && proc.PortOpen(svc.Port) {
+		err := fmt.Errorf("端口 %d 已被占用（可能已在 IDEA 或其它终端运行）", svc.Port)
+		p.fail(svc.Name, op, err)
+		// 不带诊断：这一次运行一个字都没往日志里写过（还没轮到监督进程），
+		// 读出来的只会是上一件事的原文，张冠李戴比不说更坏。
+		p.sayStartFail(svc, op, j.auto, diag.Hit{}, false, err.Error())
+		return false
+	}
+
+	if len(svc.DepWaiters()) == 0 {
+		p.pullUp(j, nil)
+		return false
+	}
+	// 等前置不占着队列：留在这里等，一个要等 Java 就绪才起的服务会把排在它后面的
+	// 每一个都压住，而那条流水线本来只受编译速度限制（见 cmdUp 顶上那段说明）。
+	p.setPhase(svc.Name, op, "deps")
+	p.fireNotify()
+	go func() {
+		defer close(op.started)
+		missed := p.waitDeps(op.ctx, svc)
+		if op.ctx.Err() != nil {
+			return
+		}
+		p.pullUp(j, missed)
+	}()
+	return true
+}
+
+// pullUp 是启动里「与前置无关」的那一半：拉起进程、之后等自己的探针。
+// missed 是没能等到就绪的前置，写进这个服务的说明里（见 setDepNote）。
+func (p *Panel) pullUp(j job, missed []string) {
 	svc, op := j.svc, j.op
 	p.mu.Lock()
 	sup, cfg := p.sup, p.cfg
@@ -773,16 +849,7 @@ func (p *Panel) startOne(j job) {
 		p.fail(svc.Name, op, errors.New("尚未加载服务清单"))
 		return
 	}
-
-	// 端口已被监听说明可能已经在 IDEA 或别的终端跑着，此时再起一个必然冲突。
-	if svc.Port > 0 && proc.PortOpen(svc.Port) {
-		err := fmt.Errorf("端口 %d 已被占用（可能已在 IDEA 或其它终端运行）", svc.Port)
-		p.fail(svc.Name, op, err)
-		// 不带诊断：这一次运行一个字都没往日志里写过（还没轮到监督进程），
-		// 读出来的只会是上一件事的原文，张冠李戴比不说更坏。
-		p.sayStartFail(svc, op, j.auto, diag.Hit{}, false, err.Error())
-		return
-	}
+	p.setDepNote(svc.Name, missed)
 	if err := sup.StartContext(op.ctx, svc); err != nil {
 		if op.ctx.Err() == nil {
 			p.fail(svc.Name, op, err)
@@ -811,11 +878,101 @@ func (p *Panel) startOne(j job) {
 	// 一行错都没有。真正需要人注意的情况——服务起不来——另有更准的信号：
 	// 进程不在了（stale），或者端口没起来。
 	go func() {
-		proc.WaitHealthyContext(op.ctx, svc.Health, proc.HealthWait)
+		proc.WaitHealthyContext(op.ctx, svc.AbsDir(), svc.Health, proc.HealthWait)
 		if op.ctx.Err() == nil {
 			p.finish(svc.Name, op)
 		}
 	}()
+}
+
+// waitDeps 等那些声明了条件的前置就绪，返回没等到的名字。
+//
+// 只等声明了条件的（见 config.Service.DepWaiters）：没写条件的那些照旧只排顺序，
+// 一条也不等。等待会把启动串起来，而「全部启动」原本是一条流水线，
+// 不该因为某个服务写了一句 depends_on 就整体慢下来。
+//
+// 等不到照旧起（见 pullUp），这里只负责把名字带回去。
+func (p *Panel) waitDeps(ctx context.Context, svc *config.Service) []string {
+	waiters := svc.DepWaiters()
+	if len(waiters) == 0 {
+		return nil
+	}
+	var missed []string
+	for _, name := range waiters {
+		if ctx.Err() != nil {
+			return nil
+		}
+		dep, ok := proc.DepProbe(p.Config(), name)
+		// 前置不在清单里、或者它没有探针：加载时的校验已经拦过一遍
+		// （改名、删除都会把这类依赖一起改掉），走到这儿的多半是在这次编辑与
+		// 这次启动之间换了清单。没什么可等的，直接记下名字。
+		if !ok || dep.Probe == "" {
+			missed = append(missed, name)
+			continue
+		}
+		// 它根本不会就绪时不要等满窗口：等的是一个不会发生的事，三分半之后
+		// 结局和现在一样，只是用户多等了三分钟（见 depComing）。
+		if !p.depComing(name) {
+			missed = append(missed, name)
+			continue
+		}
+		if !proc.WaitHealthyContext(ctx, dep.Dir, dep.Probe, proc.HealthWait) {
+			if ctx.Err() != nil {
+				return nil
+			}
+			missed = append(missed, name)
+		}
+	}
+	return missed
+}
+
+// depComing 判断这个前置还有没有可能就绪：它正在被拉起来，或者它这会儿就在跑。
+//
+// 这一条是为了「不等一个不会发生的事」。最典型的场景是标了「不参与全部启停」的
+// 前置：全部启动时不排它，而排在后面的那个服务会老老实实等满三分半，
+// 然后说一句「依赖 X 没等到」——那句话是对的，但三分钟之前就已经是结论了。
+//
+// 判定刻意保守：只要它还在跑就算「有戏」。一个跑着却不健康的前置（探针地址填错了、
+// 或者它自己起了一半）仍然等满窗口——那种情况 Pier 看不出「它永远不会好」，
+// 猜错的方向是「不等就起」，那会让依赖条件形同虚设。
+func (p *Panel) depComing(name string) bool {
+	p.mu.Lock()
+	op := p.ops[name]
+	cfg := p.cfg
+	p.mu.Unlock()
+	if op != nil && op.phase != "error" {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	state, err := proc.LoadState(cfg.StatePath())
+	if err != nil {
+		return false
+	}
+	e, ok := state.Services[name]
+	return ok && proc.EntryAlive(e)
+}
+
+// setDepNote 记下这次启动没等到哪些前置，空列表表示这次等到了（或没有要等的）。
+//
+// 只在启动时写：它说的是「起来那一下发生了什么」，而这个服务一直跑着，
+// 那句话不会因为时间过去就变得不对。
+func (p *Panel) setDepNote(name string, missed []string) {
+	p.mu.Lock()
+	if len(missed) == 0 {
+		delete(p.depNotes, name)
+	} else {
+		p.depNotes[name] = missed
+	}
+	p.mu.Unlock()
+}
+
+// depNote 是这个服务此刻该显示的「没等到的前置」，没有则为空。
+func (p *Panel) depNote(name string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.depNotes[name]
 }
 
 // 下面三个写状态的方法都先核对「这个服务身上的动作还是不是 op」：被停止打断的
@@ -1079,9 +1236,9 @@ func dependencyClosure(cfg *config.Config, name string) map[string]bool {
 			continue
 		}
 		for _, d := range s.DependsOn {
-			if !in[d] {
-				in[d] = true
-				queue = append(queue, d)
+			if name := config.DepName(d); !in[name] {
+				in[name] = true
+				queue = append(queue, name)
 			}
 		}
 	}

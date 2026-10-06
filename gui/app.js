@@ -248,7 +248,7 @@
         diag: null,
         // 依赖、重启与「全部」：默认没有前置、不自动重启、算在「全部」里，
         // 需要演的那几条各自覆盖。
-        dependsOn: [], restart: "", restartNote: "", manual: false,
+        dependsOn: [], restart: "", restartNote: "", depNote: "", manual: false,
         runtimes: [DEMO_GO],
         usage: { cpu: 0, memBytes: 0, procs: 0 }
       }, o);
@@ -298,10 +298,14 @@
         mk({ name: "demo-app", port: 47812, statusKey: "starting", statusText: "启动中",
           pid: 48220, uptime: "8s", op: "等待就绪", opKind: "start", running: true, portOpen: true,
           health: "http://localhost:47812/app/health", hasHealth: true,
-          // 这一条同时演「有前置」和「崩过、被拉起来了」：说明位那句是照
-          // internal/panel 的 restartNote 原样写的，界面上不另拼一份。
-          dependsOn: ["demo-admin"], restart: "on-failure",
+          // 这一条同时演「有前置」「崩过、被拉起来了」「前置没等到」：
+          // 说明位那两句照 internal/panel 的 restartNote 与 view.DepMissed
+          // 原样写，界面上不另拼一份。两个前置一个等到了（demo-admin 好好的）、
+          // 一个没等到——mock-payment 那个探针一直没过（见下面那一条），
+          // 等它的服务自然等不到。等不到照旧起，这一行就是那件事唯一的痕迹。
+          dependsOn: ["demo-admin:healthy", "mock-payment:healthy"], restart: "on-failure",
           restartNote: "进程退出后已自动重启 1 次",
+          depNote: "没有等到 mock-payment 就绪",
           note: "尚未通过健康探针",
           usage: { cpu: 1.2, memBytes: 134217728, procs: 2 } }),
         mk({ name: "demo-web", kind: "node", port: 47813, statusKey: "external",
@@ -1491,6 +1495,10 @@
     // 长得一模一样，而这两件事要看的程度差得远；到顶之后「不救了」更是只能从
     // 这一句里看出来。措辞由后端的 restartNote 给，这里不另写一份。
     if (hasVal(s.restartNote)) bits.push({ t: s.restartNote, warn: true });
+    // 「没等到前置」和自动重启是同一类事：这一行看着和平时一模一样（服务在跑、
+    // 探针也通），只有这一句能说出它起来的时候依赖其实没在。用警示色，
+    // 因为它说的是一件没兑现的承诺，而不是一条备注。措辞由后端的 view.DepMissed 给。
+    if (hasVal(s.depNote)) bits.push({ t: s.depNote, warn: true });
     if (hasVal(s.userNote)) bits.push({ t: s.userNote });
     else if (hasVal(s.note) && !waitingHealth && !hasVal(s.portNote)) {
       bits.push({ t: s.note, warn: !!s.probeExpired });
@@ -2530,8 +2538,9 @@
                  「健康探针未通过」并给一个「不再检查健康」。这段话说在栏位下面
                  而不是塞进 placeholder：placeholder 一输入就没了，而这一段要
                  在人看着自己刚填的地址时起作用。 */}
-          <${A.Form.Item} name="health" label="健康检查" extra=${"选填。填了就等到探通才显示「运行中」；填错或服务没有这个接口也不影响运行，只会一直在说明里提示，随时可以关掉。"}>
-            <${A.Input} placeholder="http://localhost:8080/health，留空只看进程是否存活"/>
+          <${A.Form.Item} name="health" label="健康检查"
+            extra=${"选填。填了就等到探通才显示「运行中」；填错或服务没有这个接口也不影响运行，只会一直在说明里提示，随时可以关掉。三种写法：http(s)://… 要 2xx/3xx、tcp://host:port 只要连得上（数据库、缓存这类没有 HTTP 接口的用这个）、cmd: 开头的命令退出码为 0。"}>
+            <${A.Input} className="dc-mono" placeholder="http://localhost:8080/health 或 tcp://localhost:3306"/>
           <//>
 
           <${A.Form.Item} name="note" label="备注说明">
@@ -2614,12 +2623,25 @@
             ${"" /* 只列清单里已有的服务，不给自由输入：写错一个名字的后果是这份清单
                    直接加载不了（「依赖的 X 不在清单里」），而报错要等到下次启动才看得到。
                    把自己排掉，是因为「依赖了自己」同样是一条加载不了的清单。 */}
-            <${A.Form.Item} name="dependsOn" label="前置服务">
+            ${"" /* 每个名字给两条：只写名字的只排顺序，带条件的会在启动前等它就绪。
+                   不另做一个「等哪些」的第二个下拉：那样同一个前提就被拆到两处去说，
+                   而「等它就绪」本来就是这一条的加强版，不是另一件事。
+                   名字里带冒号的服务不受影响——条件那半截在第一个冒号处切开，
+                   而清单里的服务名不允许有冒号（加载时会拦下）。 */}
+            <${A.Form.Item} name="dependsOn" label="前置服务"
+              extra="只选名字：排在它后面起。选「等就绪」：启动前先等它探通，最多 3 分钟，等不到照样起，界面上会写一句。前置自己没配健康检查的，就没有这一条可选。">
               <${A.Select} mode="multiple" allowClear showSearch
                 placeholder="它们先起来，本服务才轮到"
                 options=${(props.knownNames || []).filter(function (n) {
                   return n !== (editing ? editing.name : "");
-                }).map(function (n) { return { value: n, label: n }; })}/>
+                }).reduce(function (acc, n) {
+                  acc.push({ value: n, label: n });
+                  if ((props.healthNames || []).indexOf(n) >= 0) {
+                    acc.push({ value: n + ":healthy", label: n + "（等就绪）",
+                      title: "启动前等 " + n + " 的健康探针通过，最多 3 分钟" });
+                  }
+                  return acc;
+                }, [])}/>
             <//>
             ${"" /* 只有这一个可选值。Pier 不常驻，「总是重启」与「失败时重启」在这里
                    没有差别，多摆一个只会让人琢磨它们差在哪。 */}
@@ -4808,6 +4830,11 @@
         adopt=${form.adopt}
         groups=${groups} defaultGroup=${selected === "all" ? "" : selected}
         knownNames=${services.map(function (s) { return s.name; })}
+        ${"" /* 配了健康检查的那些。依赖里「等就绪」这一条只对它们成立，
+               而清单加载时会直接拒掉「依赖一个没有探针的服务」——下拉里就该
+               只留能选中的那些，别让用户写完一保存才被告知不行。 */}
+        healthNames=${services.filter(function (s) { return !!s.health; })
+          .map(function (s) { return s.name; })}
         message=${msg.message}
         onSaved=${refresh}
         onClose=${function () { setForm({ open: false, editing: null }); }}/>

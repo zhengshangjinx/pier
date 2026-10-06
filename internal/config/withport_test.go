@@ -60,9 +60,9 @@ func TestWithPortNoopCases(t *testing.T) {
 	}
 }
 
-// 健康地址里的端口只在「它真的是端口」时才换。路径里出现同一个数字是常事，
+// 探针里的端口只在「它真的是端口」时才换。路径里出现同一个数字是常事，
 // 按字符串替换会把它一起改掉——那是个改错了也不会有人发现的地方。
-func TestWithPortInURL(t *testing.T) {
+func TestWithPortInProbe(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
@@ -76,11 +76,17 @@ func TestWithPortInURL(t *testing.T) {
 		{"不带端口", "http://localhost/health", "http://localhost/health"},
 		{"本来就不是 URL", "反正是空着", "反正是空着"},
 		{"空串", "", ""},
+		// tcp 探针走的是同一条路：它也是个带端口的地址，跟着换才探得到换过端口的那一份。
+		{"tcp 探针", "tcp://localhost:8080", "tcp://localhost:8081"},
+		{"tcp 探针端口不是那个数", "tcp://localhost:5432", "tcp://localhost:5432"},
+		// cmd 探针是一条命令，里面的端口是用户写的字，不做替换：把命令里所有的
+		// 8080 换成 8081，或者只换其中一处，两种都可能在改一件不该改的事。
+		{"cmd 探针不动", "cmd: curl -f http://localhost:8080/health", "cmd: curl -f http://localhost:8080/health"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := withPortInURL(c.raw, 8080, 8081); got != c.want {
-				t.Errorf("withPortInURL(%q) = %q，想要 %q", c.raw, got, c.want)
+			if got := withPortInProbe(c.raw, 8080, 8081); got != c.want {
+				t.Errorf("withPortInProbe(%q) = %q，想要 %q", c.raw, got, c.want)
 			}
 		})
 	}

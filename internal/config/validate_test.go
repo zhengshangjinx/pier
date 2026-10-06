@@ -27,6 +27,18 @@ func TestHealthProblem(t *testing.T) {
 		{name: "压根不是个地址", in: "http://[::1", want: "不是一个能用的地址"},
 		{name: "带空格", in: "http://localhost:8080/my health", want: "空格"},
 		{name: "两头带空格", in: " http://localhost:8080/health ", want: "空格"},
+		// tcp：连得上就算就绪。数据库、缓存、消息队列这些没有 HTTP 接口，
+		// 而「它能不能连了」正是本地起后端最想知道的。
+		{name: "tcp 正常", in: "tcp://localhost:3306", ok: true},
+		{name: "tcp 带地址", in: "tcp://127.0.0.1:6379", ok: true},
+		{name: "tcp 没有端口", in: "tcp://localhost", want: "端口"},
+		{name: "tcp 没有主机", in: "tcp://:3306", want: "tcp://主机:端口"},
+		{name: "tcp 端口不是数字", in: "tcp://localhost:abc", want: "不是一个能用的地址"},
+		// cmd：退出码 0 算就绪。命令里带空格是常态，不能被上面那条空格检查吃掉。
+		{name: "cmd 正常", in: "cmd: pg_isready -h localhost", ok: true},
+		{name: "cmd 大小写", in: "Cmd: redis-cli ping", ok: true},
+		{name: "cmd 没写命令", in: "cmd:", want: "命令"},
+		{name: "cmd 只有空格", in: "cmd:   ", want: "命令"},
 		// 留空是「这类服务没有健康接口」，正当。
 		{name: "留空", in: "", ok: true},
 	}

@@ -109,7 +109,7 @@ func cmdWait(args []string) int {
 		wg.Add(1)
 		go func(svc *config.Service) {
 			defer wg.Done()
-			ok := proc.WaitHealthy(svc.Health, timeout)
+			ok := proc.WaitHealthy(svc.AbsDir(), svc.Health, timeout)
 			mu.Lock()
 			defer mu.Unlock()
 			if ok {

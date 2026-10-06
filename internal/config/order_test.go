@@ -148,10 +148,159 @@ services:
 	}
 	for _, s := range c.Services {
 		for _, d := range s.DependsOn {
-			if pos[d] > pos[s.Name] {
+			if pos[DepName(d)] > pos[s.Name] {
 				t.Errorf("%s 排在了它的依赖 %s 前面：%s", s.Name, d, orderNames(got))
 			}
 		}
+	}
+}
+
+// TestConditionDoesNotChangeOrder 钉着条件那半截不参与排序。
+//
+// 「mysql:healthy」指的仍然是 mysql 这个服务：写条件的人说的是「等它」，
+// 不是换了一个依赖对象。按整串去比的话，这条依赖匹配不上任何服务，
+// 排出来的顺序里 mysql 会被扔到最后——一个不会报错、只会把顺序搞反的坑。
+func TestConditionDoesNotChangeOrder(t *testing.T) {
+	c := mustLoad(t, `
+services:
+  - name: api
+    dir: api
+    kind: go
+    depends_on: [mysql:healthy, redis:healthy]
+  - name: mysql
+    dir: mysql
+    kind: shell
+    health: tcp://localhost:3306
+  - name: redis
+    dir: redis
+    kind: shell
+    health: "cmd: redis-cli ping"
+`)
+	if got := orderNames(c.StartOrder()); got != "mysql redis api" {
+		t.Errorf("启动顺序 = %q，想要 %q", got, "mysql redis api")
+	}
+	if got := orderNames(c.StopOrder()); got != "api redis mysql" {
+		t.Errorf("停止顺序 = %q，想要 %q", got, "api redis mysql")
+	}
+}
+
+// TestDepWaitersOnlyCountsConditional 钉着「只等声明了条件的那几条」。
+//
+// 这是这个功能里最容易过火的一处：一旦顺手把所有前置都等了，
+// 一个 Java 服务就会把它后面整条链的启动时间串起来（见 cmdUp 顶上那段）。
+func TestDepWaitersOnlyCountsConditional(t *testing.T) {
+	c := mustLoad(t, `
+services:
+  - name: api
+    dir: api
+    kind: go
+    depends_on: [db, cache:healthy, mq]
+  - name: db
+    dir: db
+    kind: shell
+  - name: cache
+    dir: cache
+    kind: shell
+    health: tcp://localhost:6379
+  - name: mq
+    dir: mq
+    kind: shell
+`)
+	api, err := c.Find("api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiters := api.DepWaiters()
+	if len(waiters) != 1 || waiters[0] != "cache" {
+		t.Errorf("要等的前置 = %v，想要只剩 cache", waiters)
+	}
+	// 没条件的照旧待在 dependsOn 里排顺序，不能被摘掉。
+	if len(api.DependsOn) != 3 {
+		t.Errorf("dependsOn 被动了：%v", api.DependsOn)
+	}
+}
+
+// TestDepNameAndCond 钉着切分本身，边界都给上。
+func TestDepNameAndCond(t *testing.T) {
+	cases := []struct {
+		in   string
+		name string
+		cond string
+	}{
+		{"mysql", "mysql", ""},
+		{"mysql:healthy", "mysql", CondHealthy},
+		{"  mysql : healthy  ", "mysql", CondHealthy},
+		{"mysql:", "mysql", ""},
+		// 名字里再出现冒号时只切第一个：报错该指向那个不认识的条件，
+		// 而不是把整串当成一个不存在的服务名。
+		{"mysql:healthy:extra", "mysql", "healthy:extra"},
+	}
+	for _, c := range cases {
+		if got := DepName(c.in); got != c.name {
+			t.Errorf("DepName(%q) = %q，想要 %q", c.in, got, c.name)
+		}
+		if got := DepCond(c.in); got != c.cond {
+			t.Errorf("DepCond(%q) = %q，想要 %q", c.in, got, c.cond)
+		}
+	}
+}
+
+// TestHealthyConditionNeedsAProbe 钉着「等一个没有探针的服务」拦在加载这一步。
+//
+// 放过去的话，启动时会白等满一整个窗口再落一句「没等到」——而它从来没可能等到。
+func TestHealthyConditionNeedsAProbe(t *testing.T) {
+	_, err := load(t, `
+services:
+  - name: api
+    dir: api
+    kind: go
+    depends_on: [db:healthy]
+  - name: db
+    dir: db
+    kind: shell
+`)
+	if err == nil {
+		t.Fatal("依赖一个没有探针的服务居然加载成功了")
+	}
+	msg := err.Error()
+	for _, want := range []string{"db", "探针", "tcp://"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("报错里没提 %q：%s", want, msg)
+		}
+	}
+
+	// 只是排顺序（没写条件）时不管对方有没有探针：那条依赖说的是次序，
+	// 和探针无关，拿探针去拦它是拦错了对象。
+	mustLoad(t, `
+services:
+  - name: api
+    dir: api
+    kind: go
+    depends_on: [db]
+  - name: db
+    dir: db
+    kind: shell
+`)
+}
+
+// TestUnknownConditionIsRejected 钉着不认识的条件当场报错。
+//
+// 静默当成「只排顺序」是不行的：用户写下的是一件他以为会发生的事，
+// 而它不会发生，事后又没有任何痕迹。
+func TestUnknownConditionIsRejected(t *testing.T) {
+	_, err := load(t, `
+services:
+  - name: api
+    dir: api
+    kind: go
+    depends_on: [db:started]
+  - name: db
+    dir: db
+    kind: shell
+    health: tcp://localhost:3306
+`)
+	if err == nil || !strings.Contains(err.Error(), "started") {
+		t.Errorf("报错 = %v，想要指出 started 这个条件不认识", err)
 	}
 }
 

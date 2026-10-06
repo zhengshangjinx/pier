@@ -429,7 +429,7 @@ func (s *Supervisor) Status() ([]Status, error) {
 		// 进程在跑不等于服务可用：编译型服务起来后还要初始化，所以额外探一次健康。
 		if svc.Health != "" && st.Running {
 			st.HasHealth = true
-			st.Healthy = ProbeHealth(st.RunHealth())
+			st.Healthy = ProbeHealth(svc.AbsDir(), st.RunHealth())
 			// 超过等待窗口还没通过就不再算「启动中」，见 ProbeExpired 的说明。
 			st.ProbeExpired = !st.Healthy && st.Uptime > HealthWait
 		}

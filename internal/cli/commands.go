@@ -219,6 +219,39 @@ func upServices(cfgPath string, names []string, swap portSwap, resume map[string
 	started := make([]*config.Service, 0, len(targets))
 	failed := make([]string, 0)
 	skipped := make([]string, 0)
+	// depMissed 记「起来了、但没等到前置」的那些。它们不算失败——服务照常在跑——
+	// 但收尾时必须再提一句：这一行会被后面几十行顶走，而它是用户唯一能看见这条依赖
+	// 没兑现的地方（状态上看不出来，进程好端端地在跑）。
+	depMissed := make(map[string][]string)
+
+	report := func(svc *config.Service, missed []string, err error) {
+		if err != nil {
+			fmt.Printf("  %-14s 启动失败：%v\n", svc.Name, err)
+			printDiag(cfg, svc.Name, "    ")
+			tailLog(cfg, svc.Name, logTailLines)
+			failed = append(failed, svc.Name)
+			return
+		}
+		fmt.Printf("  %-14s 已启动%s\n", svc.Name, depSuffix(missed))
+		started = append(started, svc)
+		if len(missed) > 0 {
+			depMissed[svc.Name] = missed
+		}
+	}
+
+	// 有前置要等的先派出去等，别在循环里干等：串行的等会把「等 MySQL 就绪」的代价
+	// 摊到排在它后面的每一个服务上，而 up 的时序本来就是先全部拉起、再统一等
+	// （见 cmdUp 顶上那段）。等待各自有上限，都在循环后面收口。
+	type depStart struct {
+		svc    *config.Service
+		missed []string
+		err    error
+		done   chan struct{}
+	}
+	var waiting []*depStart
+	// 「它还会不会来」的判定要一次算好：这是个快照，而等待期间自己那一份会变
+	// （被这次起来的服务写进状态文件），中途重算就是把「谁在等谁」越算越乱。
+	coming := comingNames(cfg, targets)
 
 	for _, svc := range targets {
 		// 端口已被监听说明可能已经在 IDEA 或别的终端跑着，此时再起一个必然冲突。
@@ -227,15 +260,21 @@ func upServices(cfgPath string, names []string, swap portSwap, resume map[string
 			skipped = append(skipped, svc.Name)
 			continue
 		}
-		if err := sup.Start(svc); err != nil {
-			fmt.Printf("  %-14s 启动失败：%v\n", svc.Name, err)
-			printDiag(cfg, svc.Name, "    ")
-			tailLog(cfg, svc.Name, logTailLines)
-			failed = append(failed, svc.Name)
+		if len(svc.DepWaiters()) == 0 {
+			report(svc, nil, sup.Start(svc))
 			continue
 		}
-		fmt.Printf("  %-14s 已启动\n", svc.Name)
-		started = append(started, svc)
+		d := &depStart{svc: svc, done: make(chan struct{})}
+		waiting = append(waiting, d)
+		go func() {
+			defer close(d.done)
+			d.missed = waitDeps(cfg, svc, coming)
+			d.err = sup.Start(svc)
+		}()
+	}
+	for _, d := range waiting {
+		<-d.done
+		report(d.svc, d.missed, d.err)
 	}
 
 	// 没通过探针和没启动是两件事，分开记：前者进程已经在跑了，问题出在探针那一路
@@ -245,7 +284,7 @@ func upServices(cfgPath string, names []string, swap portSwap, resume map[string
 		if svc.Health == "" {
 			continue
 		}
-		if proc.WaitHealthy(svc.Health, proc.HealthWait) {
+		if proc.WaitHealthy(svc.AbsDir(), svc.Health, proc.HealthWait) {
 			fmt.Printf("  %-14s 已就绪  %s\n", svc.Name, svc.Health)
 			continue
 		}
@@ -273,6 +312,22 @@ func upServices(cfgPath string, names []string, swap portSwap, resume map[string
 			strings.Join(notReady, "、"), proc.HealthWait)
 		fmt.Println("  确认地址是否写对，或者不需要探针就在界面上点「不再检查健康」。")
 	}
+	// 这一节**不进下面的失败判定**：服务确实起来了，up 的承诺兑现了。
+	// 没兑现的是那句 depends_on——它是「起来之前先等等」，而等只是一个尽力而为的动作，
+	// 等不到照样起（理由见 panel.pullUp）。所以这里只把话说清楚，退出码不动。
+	if len(depMissed) > 0 {
+		names := make([]string, 0, len(depMissed))
+		for _, svc := range started {
+			if _, ok := depMissed[svc.Name]; ok {
+				names = append(names, svc.Name)
+			}
+		}
+		fmt.Printf("\n没等到前置：%s\n", strings.Join(names, "、"))
+		for _, name := range names {
+			fmt.Printf("  %-14s %s\n", name, view.DepMissed(depMissed[name]))
+		}
+		fmt.Println("  服务照常起来了；前置就绪之后再启动一次这几个，它们才是在依赖已经在了的情况下起来的。")
+	}
 	if len(failed)+len(skipped)+len(notReady) > 0 {
 		return 1
 	}
@@ -284,6 +339,67 @@ func upServices(cfgPath string, names []string, swap portSwap, resume map[string
 	}
 	fmt.Printf("\n已启动 %d 个服务。查看状态：pier status\n", len(started))
 	return 0
+}
+
+// depSuffix 把「没等到的前置」接在「已启动」那一行后面，等到了就什么都不说。
+//
+// 用括号跟在后面而不是另起一行：这一行说的是同一个服务的同一件事，
+// 拆成两行之后，中间插进来的其它服务的输出会让两行看着像在说两个服务。
+func depSuffix(missed []string) string {
+	if len(missed) == 0 {
+		return ""
+	}
+	return "（" + view.DepMissed(missed) + "）"
+}
+
+// comingNames 判断哪些前置还有可能就绪：这次要起的都在里面，另外加上此刻就在跑的。
+//
+// 判它来不来是为了不等一个不会发生的事。最典型的是先起一个服务、却没起它的前置：
+// 那条依赖那时候根本没有人会去满足，等满三分半之后结局和现在一样，
+// 只是用户白等了三分钟（界面那边同一个判定见 panel.depComing）。
+//
+// 读不出状态文件时只认名单里那些：那一份的前置有没有在跑反正问不出来，
+// 而名单里的一律会起来，不至于把该等的也跳过。
+func comingNames(cfg *config.Config, targets []*config.Service) map[string]bool {
+	coming := make(map[string]bool, len(targets))
+	for _, svc := range targets {
+		coming[svc.Name] = true
+	}
+	state, err := proc.LoadState(cfg.StatePath())
+	if err != nil {
+		return coming
+	}
+	for name, e := range state.Services {
+		if proc.EntryAlive(e) {
+			coming[name] = true
+		}
+	}
+	return coming
+}
+
+// waitDeps 等那些声明了条件的前置就绪，返回没等到的名字。
+//
+// 只等声明了条件的（见 config.Service.DepWaiters）：没写条件的那些照旧只排顺序。
+// 等不到照旧起，这里只负责把名字带回去。
+func waitDeps(cfg *config.Config, svc *config.Service, coming map[string]bool) []string {
+	var missed []string
+	for _, name := range svc.DepWaiters() {
+		dep, ok := proc.DepProbe(cfg, name)
+		// 前置不在清单里、或者它没有探针：加载时的校验已经拦过一遍，
+		// 走到这儿的多半是这一次编辑与这一次启动之间换了清单。没什么可等的。
+		if !ok || dep.Probe == "" {
+			missed = append(missed, name)
+			continue
+		}
+		if !coming[name] {
+			missed = append(missed, name)
+			continue
+		}
+		if !proc.WaitHealthy(dep.Dir, dep.Probe, proc.HealthWait) {
+			missed = append(missed, name)
+		}
+	}
+	return missed
 }
 
 // cmdDown 停止服务。对「不是 Pier 启动的」与「已经退出」两种情况只作提示，
@@ -435,7 +551,9 @@ func statusJSON(cfgPath string) int {
 	if cfg != nil {
 		sup = proc.New(cfg)
 	}
-	st := panel.Snapshot(cfg, sup, path, src, errText(cfgErr), nil, nil)
+	// 两个空白的 Notes：这两样都在面板的内存里（服务自己起的那些，命令行这边没有），
+	// 而快照的其余部分与界面完全一致——同一条命令看到的就是同一份状态。
+	st := panel.Snapshot(cfg, sup, path, src, errText(cfgErr), nil, panel.Notes{})
 	printJSON(st)
 	if !st.OK {
 		return 1
