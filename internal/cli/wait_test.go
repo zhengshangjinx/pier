@@ -7,44 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
-
-// `30` 与 `30s` 都要认：脚本里最容易写出来的是前者，为它回一句
-// 「请写成 30s」不值得。认不出来的必须报错，不能悄悄退回默认的 180s。
-func TestParseTimeout(t *testing.T) {
-	cases := []struct {
-		in   string
-		want time.Duration
-		bad  bool
-	}{
-		{in: "30", want: 30 * time.Second},
-		{in: "30s", want: 30 * time.Second},
-		{in: "2m", want: 2 * time.Minute},
-		{in: "1m30s", want: 90 * time.Second},
-		{in: "0", bad: true},
-		{in: "-5", bad: true},
-		{in: "0s", bad: true},
-		{in: "一会儿", bad: true},
-		{in: "", bad: true},
-	}
-	for _, c := range cases {
-		got, err := parseTimeout(c.in)
-		if c.bad {
-			if err == nil {
-				t.Errorf("parseTimeout(%q) = %v，本该报错", c.in, got)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("parseTimeout(%q) 报错：%v", c.in, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("parseTimeout(%q) = %v，想要 %v", c.in, got, c.want)
-		}
-	}
-}
 
 // 三种等不到要在「等」之前就说清楚：等下去也不会有结果，而盯着一个不会再变的
 // 东西看三分钟，正是 wait 该替人省掉的事。

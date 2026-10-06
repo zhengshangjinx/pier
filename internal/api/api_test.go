@@ -274,20 +274,32 @@ func settle(t *testing.T, p *panel.Panel) {
 // call 发一个请求，返回状态码与解好的包体。
 func call(t *testing.T, s *Server, method, path, token string) (int, map[string]any) {
 	t.Helper()
-	req := httptest.NewRequest(method, path, nil)
+	return callBody(t, s, method, path, token, "")
+}
+
+// callBody 与 call 相同，另外带一个请求体。空串表示不带体。
+func callBody(t *testing.T, s *Server, method, path, token, body string) (int, map[string]any) {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 
-	var body map[string]any
+	var out map[string]any
 	if rec.Body.Len() > 0 {
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatalf("%s %s 的回包不是 JSON：%v\n%s", method, path, err, rec.Body.String())
 		}
 	}
-	return rec.Code, body
+	return rec.Code, out
 }
 
 // TestHealthAndSpecNeedNoToken 钉着这两个入口不查令牌。
@@ -321,6 +333,9 @@ func TestAPIRoutesNeedToken(t *testing.T) {
 		{"GET", "/api/state"},
 		{"GET", "/api/services"},
 		{"GET", "/api/services/alpha"},
+		{"POST", "/api/services/start"},
+		{"POST", "/api/services/stop"},
+		{"POST", "/api/services/wait"},
 		{"POST", "/api/services/alpha/start"},
 		{"POST", "/api/services/alpha/stop"},
 		{"GET", "/api/services/alpha/logs"},
@@ -476,6 +491,180 @@ func TestStateReportsConfigFailure(t *testing.T) {
 	// 探活照样通：脚本据此把「Pier 在跑但清单坏了」和「Pier 没在跑」分开。
 	if code, _ := call(t, s, "GET", "/health", ""); code != http.StatusOK {
 		t.Errorf("清单坏掉时 /health 状态码 = %d，想要 200", code)
+	}
+}
+
+// ── 一次动一批 ─────────────────────────────────────────────────────────────
+
+// newSetServer 起一个带分组与依赖的接口服务，专给这几条批量接口用。
+func newSetServer(t *testing.T) *Server {
+	t.Helper()
+	t.Setenv("PIER_HOME", t.TempDir())
+
+	dir := t.TempDir()
+	base := filepath.Join(dir, "pier.yaml")
+	const yaml = `
+services:
+  - name: web
+    dir: w
+    kind: shell
+    group: 前端
+    depends_on: [api]
+  - name: api
+    dir: a
+    kind: shell
+    group: 后端
+`
+	if err := os.WriteFile(base, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("写清单失败：%v", err)
+	}
+	p := panel.New()
+	t.Cleanup(func() {
+		settle(t, p)
+		p.Close()
+	})
+	if err := p.Load(base); err != nil {
+		t.Fatalf("加载清单失败：%v", err)
+	}
+	return New(p, "127.0.0.1:0", "secret")
+}
+
+// 空请求体就是「全部」：curl 手搓一次全部启动，不该先拼一个 {} 出来。
+func TestStartSetEmptyBodyMeansAll(t *testing.T) {
+	s := newSetServer(t)
+
+	code, body := callBody(t, s, "POST", "/api/services/start", "secret", "")
+	if code != http.StatusAccepted {
+		t.Fatalf("状态码 = %d，想要 202（%v）", code, body)
+	}
+	if msg, _ := body["msg"].(string); msg == "" {
+		t.Error("202 的回包里没有 msg，调用方不知道排了什么")
+	}
+}
+
+// 分组与点名的选择要走通，且 msg 里说清楚这一批是哪几个。
+func TestStartSetByGroup(t *testing.T) {
+	s := newSetServer(t)
+
+	code, body := callBody(t, s, "POST", "/api/services/start", "secret", `{"group":"前端"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("按分组启动状态码 = %d，想要 202（%v）", code, body)
+	}
+	msg, _ := body["msg"].(string)
+	// web 依赖 api：按分组起 web 时要连带把跨组的 api 一起起，并说明白。
+	if !strings.Contains(msg, "前置") || !strings.Contains(msg, "api") {
+		t.Errorf("msg = %q，想要说明带上了前置 api", msg)
+	}
+}
+
+// 三种「选法有问题」要分成三个状态码。
+//
+// 全揉成一句 409 的话，脚本只能读 msg 里的中文才分得出该改哪一头——
+// 是请求写错了（400），还是清单里没这个东西（404）。
+func TestSelectionFailuresAreTyped(t *testing.T) {
+	s := newSetServer(t)
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		// 键名写错是最危险的一种：当成「没有选择」的话，本来想动一个服务，
+		// 结果把全部服务都停了。
+		{"键名写错", `{"service":"api"}`, http.StatusBadRequest},
+		{"两个字段都给", `{"names":["api"],"group":"前端"}`, http.StatusBadRequest},
+		{"请求体不是对象", `["api"]`, http.StatusBadRequest},
+		{"名字不存在", `{"names":["nope"]}`, http.StatusNotFound},
+		{"分组不存在", `{"group":"前端组"}`, http.StatusNotFound},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, path := range []string{"/api/services/start", "/api/services/stop"} {
+				code, body := callBody(t, s, "POST", path, "secret", c.body)
+				if code != c.want {
+					t.Errorf("%s 状态码 = %d，想要 %d（%v）", path, code, c.want, body)
+				}
+				if msg, _ := body["msg"].(string); strings.TrimSpace(msg) == "" {
+					t.Errorf("%s 的回包没写原因：%v", path, body)
+				}
+			}
+		})
+	}
+}
+
+// 分组名写错时要把现有的分组列出来：拿到回包的人多半正对着一份清单找自己写错
+// 在哪儿，而「没有这个分组」四个字不会告诉他该写哪个。
+func TestSelectionFailureListsGroups(t *testing.T) {
+	s := newSetServer(t)
+
+	_, body := callBody(t, s, "POST", "/api/services/start", "secret", `{"group":"前端组"}`)
+	msg, _ := body["msg"].(string)
+	for _, want := range []string{"前端组", "前端", "后端"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("msg = %q，少了 %q", msg, want)
+		}
+	}
+}
+
+// wait 的 ok 说的是「全都就绪了没有」，不是「请求处理成功没有」。
+//
+// 与 /api/state 一个规矩：状态码说的是答没答上来，答案本身在 ok 里。
+// 全都就绪是 200 + ok=true，有没等到的是 200 + ok=false，外加每条一句为什么。
+func TestWaitReportsNotReady(t *testing.T) {
+	s := newSetServer(t)
+
+	code, body := callBody(t, s, "POST", "/api/services/wait", "secret", `{"names":["api"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 = %d，想要 200（%v）", code, body)
+	}
+	if body["ok"] != false {
+		t.Errorf("没配探针却 ok = %v，想要 false", body["ok"])
+	}
+	wait, _ := body["wait"].([]any)
+	if len(wait) != 1 {
+		t.Fatalf("wait = %v，想要一条", body["wait"])
+	}
+	one, _ := wait[0].(map[string]any)
+	if one["name"] != "api" || one["ready"] != false || one["why"] != "no_probe" {
+		t.Errorf("结果 = %v，想要 api 没就绪、原因是 no_probe", one)
+	}
+	if msg, _ := body["msg"].(string); !strings.Contains(msg, "api") {
+		t.Errorf("msg = %q，要把没等到的是谁写出来", msg)
+	}
+}
+
+// 全都没配探针时，wait 当场就该答，不该等满窗口——等下去也不会有结果。
+func TestWaitAnswersImmediatelyWithoutProbes(t *testing.T) {
+	s := newSetServer(t)
+
+	start := time.Now()
+	code, body := callBody(t, s, "POST", "/api/services/wait", "secret", "")
+	if code != http.StatusOK {
+		t.Fatalf("状态码 = %d，想要 200（%v）", code, body)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Errorf("等了 %v 才回来，没配探针的应当当场就答", el)
+	}
+	wait, _ := body["wait"].([]any)
+	if len(wait) != 2 {
+		t.Errorf("wait = %v，想要两个服务各一条", body["wait"])
+	}
+}
+
+// timeout 写错要说清楚，而不是悄悄用默认的三分钟——那会让一次写错的调用
+// 变成「等满三分钟然后失败」。
+func TestWaitBadTimeout(t *testing.T) {
+	s := newSetServer(t)
+
+	code, body := callBody(t, s, "POST", "/api/services/wait?timeout=abc", "secret", "")
+	if code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，想要 400（%v）", code, body)
+	}
+	if msg, _ := body["msg"].(string); !strings.Contains(msg, "abc") {
+		t.Errorf("msg = %q，要把写错的那个值念一遍", msg)
+	}
+	if code, _ := callBody(t, s, "POST", "/api/services/wait?timeout=30s", "secret", ""); code != http.StatusOK {
+		t.Errorf("timeout=30s 状态码 = %d，想要 200", code)
 	}
 }
 

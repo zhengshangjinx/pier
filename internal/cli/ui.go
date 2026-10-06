@@ -917,15 +917,19 @@ func uiStatusStyle(st proc.Status) lipgloss.Style {
 // 「没配探针」「配了但服务没在跑」「探针没过」是三件不同的事，
 // 不能都显示成「-」，否则看不出到底是没检查还是检查失败。
 func uiHealthText(st proc.Status) (string, lipgloss.Style) {
-	switch {
-	case st.HasHealth && st.Healthy:
-		return "✓ 通过", uiOKStyle
-	case st.HasHealth:
-		return "✗ 未通过", uiErrStyle
-	case st.Service.Health != "":
-		return "未检查", uiDimStyle
+	h := view.Health{Has: st.HasHealth, OK: st.Healthy}
+	if st.Service != nil {
+		h.URL = st.Service.Health
+	}
+	// 归纳与措辞都在 view.Health 那一份里：MCP 那边手里只有 ServiceOut，
+	// 判的是同一件事，两处各写一次就会有一处把「没配」与「还没探过」写反。
+	switch h.Key() {
+	case view.HealthOK:
+		return h.Text(), uiOKStyle
+	case view.HealthFailed:
+		return h.Text(), uiErrStyle
 	default:
-		return "-", uiDimStyle
+		return h.Text(), uiDimStyle
 	}
 }
 

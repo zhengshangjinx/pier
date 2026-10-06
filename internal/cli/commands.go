@@ -834,16 +834,15 @@ func tailLog(cfg *config.Config, name string, n int) {
 }
 
 // printTail 打印文件末尾 n 行。日志文件通常不大，整读后再切行比维护环形缓冲更简单。
+//
+// 「最后 n 行」这件事只有一份实现（view.TailText）：MCP 的 read_logs 交出去的
+// 也是同一份日志的末尾，两处各切一次迟早切出两个行数。
 func printTail(f *os.File, n int) error {
 	raw, err := os.ReadFile(f.Name())
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	for _, l := range lines {
+	for _, l := range strings.Split(view.TailText(string(raw), n), "\n") {
 		fmt.Println("    " + l)
 	}
 	return nil

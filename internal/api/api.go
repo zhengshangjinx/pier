@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -28,7 +29,10 @@ import (
 	"time"
 
 	"github.com/zhengshangjinx/pier/internal/config"
+	"github.com/zhengshangjinx/pier/internal/manage"
 	"github.com/zhengshangjinx/pier/internal/panel"
+	"github.com/zhengshangjinx/pier/internal/proc"
+	"github.com/zhengshangjinx/pier/internal/view"
 )
 
 // DefaultPort 是接口默认监听的端口。
@@ -191,6 +195,9 @@ func (s *Server) routes() []route {
 		{"GET", "/openapi.json", s.handleOpenAPI},
 		{"GET", "/api/state", s.handleState},
 		{"GET", "/api/services", s.handleServices},
+		{"POST", "/api/services/start", s.actSet("start")},
+		{"POST", "/api/services/stop", s.actSet("stop")},
+		{"POST", "/api/services/wait", s.handleWaitSet},
 		{"GET", "/api/services/{name}", s.handleService},
 		{"POST", "/api/services/{name}/start", s.action("start")},
 		{"POST", "/api/services/{name}/stop", s.action("stop")},
@@ -266,6 +273,7 @@ type response struct {
 	Services []panel.ServiceOut `json:"services,omitempty"`
 	Service  *panel.ServiceOut  `json:"service,omitempty"`
 	Log      *panel.LogOut      `json:"log,omitempty"`
+	Wait     []proc.WaitResult  `json:"wait,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -353,6 +361,113 @@ func (s *Server) action(kind string) http.HandlerFunc {
 			msg = fmt.Sprintf("已把 %s 排入队列", name)
 		}
 		writeJSON(w, http.StatusAccepted, response{OK: true, Msg: msg})
+	}
+}
+
+// actSet 是「一次动一批」的那两条：POST /api/services/start 与 …/stop。
+//
+// 请求体是一份选择（见 panel.Selection）：{"names":["api"]}、{"group":"前端"}，
+// 或者空着——空请求体就是「全部」，与界面上那颗「全部启动」、命令行不带名字的
+// pier up / down 是同一份名单。curl 手搓一次全部启动，不必先拼一个 {} 出来。
+func (s *Server) actSet(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sel, read := readSelection(w, r)
+		if !read {
+			return
+		}
+		var msg string
+		var err error
+		switch kind {
+		case "start":
+			msg, err = s.panel.StartSet(sel)
+		case "stop":
+			msg, err = s.panel.StopSet(sel)
+		}
+		if err != nil {
+			failSelection(w, err)
+			return
+		}
+		if msg == "" {
+			msg = "已排入队列"
+		}
+		// 与单个服务那三条一样回 202：排进队列不等于已经起来。
+		writeJSON(w, http.StatusAccepted, response{OK: true, Msg: msg})
+	}
+}
+
+// handleWaitSet 等一批服务通过健康探针：POST /api/services/wait。
+//
+// 这是「起完再等就绪」那一步的答案。POST …/start 立刻回 202，此后要自己轮询
+// /api/state——而轮询里能看到的只有「在不在跑」，看不出探针通没通，于是每个
+// 调用方都得自己写一段「每 500 毫秒看一次，最多看三分钟」。
+func (s *Server) handleWaitSet(w http.ResponseWriter, r *http.Request) {
+	sel, read := readSelection(w, r)
+	if !read {
+		return
+	}
+	var timeout time.Duration
+	if v := strings.TrimSpace(r.URL.Query().Get("timeout")); v != "" {
+		d, err := proc.ParseWaitTimeout(v)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "timeout %v", err)
+			return
+		}
+		timeout = d
+	}
+	out, err := s.panel.WaitSetCtx(r.Context(), sel, timeout)
+	if err != nil {
+		failSelection(w, err)
+		return
+	}
+	ready := 0
+	for _, r := range out {
+		if r.Ready {
+			ready++
+		}
+	}
+	// 回 200 而不是 4xx 就算问到了：与 /api/state 一个规矩——状态码说的是
+	// 「这个请求答没答上来」，答案本身（全就绪了没有）在 ok 与 wait 里。
+	// ok 为假配的那句话与命令行 pier wait 的非 0 退出是同一个意思。
+	if ready == len(out) {
+		ok(w, response{OK: true, Msg: fmt.Sprintf("%d 个服务已就绪", ready), Wait: out})
+		return
+	}
+	ok(w, response{OK: false, Msg: "没等到：" + view.WaitMissed(out, timeout), Wait: out})
+}
+
+// readSelection 读请求体里的选择，读不动时已经把话说出去了。
+//
+// 只认认得的字段（DisallowUnknownFields）：写错了键名（{"service":"api"}）当场
+// 报错，比当成「没有选择」于是启动全部服务要安全得多。
+func readSelection(w http.ResponseWriter, r *http.Request) (panel.Selection, bool) {
+	var sel panel.Selection
+	// 64 KB 顶到天上去了：这份请求体是一串名字，正常几十个字节。
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&sel); err != nil {
+		if errors.Is(err, io.EOF) {
+			return sel, true
+		}
+		fail(w, http.StatusBadRequest, "请求体要是一个 JSON 对象，例如 {\"group\":\"前端\"}：%v", err)
+		return sel, false
+	}
+	return sel, true
+}
+
+// failSelection 把一次批量动作的错误翻成状态码。
+//
+// 三种错要分得开：请求写法不对（400）、清单里没有（404）、清单都没加载起来（503）。
+// 全揉成一句 409 的话，脚本只能去读 msg 里的中文才分得出该改哪一头。
+func failSelection(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, panel.ErrBadSelection):
+		fail(w, http.StatusBadRequest, "%v", err)
+	case errors.Is(err, panel.ErrUnknownSelection):
+		fail(w, http.StatusNotFound, "%v", err)
+	case errors.Is(err, manage.ErrNoConfig):
+		fail(w, http.StatusServiceUnavailable, "%v", err)
+	default:
+		fail(w, http.StatusConflict, "%v", err)
 	}
 }
 

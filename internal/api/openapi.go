@@ -68,6 +68,69 @@ const openAPISpec = `{
         }
       }
     },
+    "/api/services/start": {
+      "post": {
+        "summary": "启动一批服务",
+        "description": "一次动一批：请求体是 {\"names\":[\"api\",\"web\"]} 或 {\"group\":\"前端\"}，两个字段只能给一个。请求体留空（或发一个 {}）就是「全部」——与界面上那颗「全部启动」、命令行不带名字的 pier up 是同一份名单，标了 manual 的服务不在其中。点名或按分组挑出来的会连同前置一起起，msg 里会写明多带了哪几个。",
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Selection" } } }
+        },
+        "responses": {
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/BadSelection" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/NoConfig" }
+        }
+      }
+    },
+    "/api/services/stop": {
+      "post": {
+        "summary": "停止一批服务",
+        "description": "与启动同一份选择，顺序反着来（先停没被依赖的）。任何阶段都能停：排队中直接撤销，编译中连同整组结束进程。",
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Selection" } } }
+        },
+        "responses": {
+          "202": { "$ref": "#/components/responses/Accepted" },
+          "400": { "$ref": "#/components/responses/BadSelection" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/NoConfig" }
+        }
+      }
+    },
+    "/api/services/wait": {
+      "post": {
+        "summary": "等一批服务就绪",
+        "description": "等选择出来的那些通过健康探针，返回每一个的结果。这是「启动之后等它真的能用」那一步：POST …/start 立刻回 202，接下来靠这条等，不必自己轮询 /api/state——轮询只看得出在不在跑，看不出探针通没通。还在编译、拉起中的服务会先等它出结果再探。\n\n注意 ok 的含义与别处不同：这里说的是「全都就绪了没有」，所以全部就绪是 200 + ok=true，有没等到的是 200 + ok=false（不是错误，是一个答案）。探针没通的那几条各自带上 why：no_probe（清单里没写 health，等不到这个信号）、not_running（没在跑，先去起它）、timeout（等满了窗口）。",
+        "parameters": [
+          {
+            "name": "timeout", "in": "query", "required": false,
+            "schema": { "type": "string", "default": "180s" },
+            "description": "等多久，如 30s、2m，光写数字按秒算。不填用健康探针的默认窗口 180 秒。这是整段共用的窗口（先等它起起来，再等探针通）。"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Selection" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "等完了，结果在 wait 里；ok 为假表示有没等到的",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WaitResponse" } } }
+          },
+          "400": { "description": "请求体不是 JSON 对象，或 timeout 不是时长" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/NoConfig" }
+        }
+      }
+    },
     "/api/services/{name}": {
       "get": {
         "summary": "看一个服务",
@@ -168,7 +231,11 @@ const openAPISpec = `{
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Failure" } } }
       },
       "NotFound": {
-        "description": "清单里没有这个服务",
+        "description": "清单里没有这个服务或分组。msg 里会列出可用的名字——分组写错时还列出有哪些分组。",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Failure" } } }
+      },
+      "BadSelection": {
+        "description": "选择本身写得不对：names 与 group 都给了、names 里有个空名字，或者键名不是这两个。",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Failure" } } }
       },
       "Conflict": {
@@ -277,6 +344,46 @@ const openAPISpec = `{
               "line": { "type": "string", "description": "命中的那行原文。端口号、模块名这些字只在它里面，而它们才是「该去改哪一处」的答案。" }
             },
             "additionalProperties": true
+          }
+        }
+      },
+      "Selection": {
+        "type": "object",
+        "description": "要动哪一批服务。留空表示「全部」。",
+        "properties": {
+          "names": {
+            "type": "array", "items": { "type": "string" },
+            "description": "点名的一批服务。标了 manual 的点了名照样动。"
+          },
+          "group": {
+            "type": "string",
+            "description": "按分组挑。没写 group 的服务归在「未分组」下。"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WaitResponse": {
+        "type": "object",
+        "required": ["ok", "wait"],
+        "properties": {
+          "ok": { "type": "boolean", "description": "是不是全都就绪了。" },
+          "msg": { "type": "string", "description": "一句总结：全部就绪时是「N 个服务已就绪」，有没等到的会列出来并各带一句为什么。" },
+          "wait": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "ready"],
+              "properties": {
+                "name": { "type": "string" },
+                "ready": { "type": "boolean" },
+                "why": {
+                  "type": "string",
+                  "enum": ["no_probe", "not_running", "timeout"],
+                  "description": "没就绪是哪一种，三种的下一步动作各不相同。就绪时没有这个字段。"
+                },
+                "probe": { "type": "string", "description": "这次实际探的地址。换过端口起的那次与清单里写的不是一个。" }
+              }
+            }
           }
         }
       },

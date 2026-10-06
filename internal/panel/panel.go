@@ -1057,17 +1057,8 @@ func (p *Panel) enqueuePort(kind, name string, port int) (string, error) {
 	return "", nil
 }
 
-// enqueueAll 把「参与全部启停」的那一批排队，顺序由依赖决定（见 startOrder / stopOrder）。
-// 标了 manual 的服务不在里头：界面上那颗按钮按下去之前，名单就已经是这一份了。
-func (p *Panel) enqueueAll(kind string) (string, error) {
-	cfg := p.Config()
-	if cfg == nil {
-		return "", manage.ErrNoConfig
-	}
-	return p.enqueueSet(kind, config.Bulk(p.order(cfg, kind)))
-}
-
 // order 按动作给出该走的顺序：启动顺着依赖，停止反着来（见 config.StopOrder）。
+// 「全部」在名单上要摘掉标了 manual 的那些，那一步在 pick 里（见 select.go）。
 func (p *Panel) order(cfg *config.Config, kind string) []*config.Service {
 	if kind == "stop" {
 		return cfg.StopOrder()
@@ -1325,27 +1316,19 @@ func (p *Panel) resumePort(name string) int {
 }
 
 // StartAll 排队启动清单里的全部服务。
-func (p *Panel) StartAll() (string, error) { return p.enqueueAll("start") }
+//
+// 「全部」就是一份空的选择（见 Selection），名单与顺序由 pick 从 config.Bulk 取：
+// 起 / 停两半是同一份「全部」，各写一份筛选的话，界面上按了没起、命令行起了没停，
+// 同一个词在两处说两件事。
+func (p *Panel) StartAll() (string, error) { return p.StartSet(Selection{}) }
 
 // StopAll 停止参与全部启停的那些服务，正在启动的也一并打断（见 Stop）。
 //
-// 名单与顺序都走 config.Bulk(cfg.StopOrder())：起 / 停两半是同一份「全部」，
-// 只排除启动的话，pier restart 会把标了 manual 的服务停掉却不再拉起来。
-// 顺序也顺带矫正成反着的——原先按清单顺序停，先把被依赖的那些停掉，
-// 后面还在跑的会对着一个已经关掉的端口刷一串连接错误。
-func (p *Panel) StopAll() (string, error) {
-	cfg := p.Config()
-	if cfg == nil {
-		return "", manage.ErrNoConfig
-	}
-	n := 0
-	for _, svc := range config.Bulk(cfg.StopOrder()) {
-		if _, err := p.Stop(svc.Name); err == nil {
-			n++
-		}
-	}
-	return fmt.Sprintf("已对 %d 个服务发出停止，正在启动的已打断", n), nil
-}
+// 名单与顺序都走 config.Bulk(cfg.StopOrder())：只排除启动那一半的话，
+// pier restart 会把标了 manual 的服务停掉却不再拉起来。顺序反着来是因为
+// 先起的那一批往往是被依赖的，先停它们等于让还在跑的服务对着一个已经关掉的端口
+// 刷一串连接错误。
+func (p *Panel) StopAll() (string, error) { return p.StopSet(Selection{}) }
 
 // SetConfig 切换到用户指定的清单。先确认能加载成功再换，避免把界面切到一个坏路径上。
 func (p *Panel) SetConfig(path string) (string, error) {

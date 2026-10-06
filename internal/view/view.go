@@ -116,6 +116,54 @@ func UptimeText(st proc.Status) string {
 	return Duration(st.Uptime)
 }
 
+// Health 是一次健康探针的结果，三样材料凑出四种情形。
+//
+// 单独起一个类型，是因为判这一档的地方有两个：终端面板手里是 proc.Status，
+// MCP 手里是 panel.ServiceOut。两边各写一个 switch 的话，四个分支里那两对
+// 长得很像的（没配探针 / 配了还没探过）迟早有一处写反，而「未检查」与
+// 「没配」在屏幕上只差一个字，含义差得远——一个再等等就好，另一个永远等不来。
+type Health struct {
+	Has bool   // 清单里配了 health 地址
+	OK  bool   // 最近一次探通了
+	URL string // 配的那个地址；探针还没跑过时靠它区分「没配」
+}
+
+// 健康探针的四种情形。
+const (
+	HealthOK        = "ok"
+	HealthFailed    = "failed"
+	HealthUnchecked = "unchecked"
+	HealthNone      = "none"
+)
+
+// Key 归纳出这一档。
+func (h Health) Key() string {
+	switch {
+	case h.Has && h.OK:
+		return HealthOK
+	case h.Has:
+		return HealthFailed
+	case h.URL != "":
+		return HealthUnchecked
+	default:
+		return HealthNone
+	}
+}
+
+// Text 是这一档的一句话。
+func (h Health) Text() string {
+	switch h.Key() {
+	case HealthOK:
+		return "✓ 通过"
+	case HealthFailed:
+		return "✗ 未通过"
+	case HealthUnchecked:
+		return "未检查"
+	default:
+		return Dash
+	}
+}
+
 // NoteText 补充一句说明，解释「为什么是现在这个状态」。
 func NoteText(st proc.Status) string {
 	switch {
@@ -163,6 +211,66 @@ func DepMissed(names []string) string {
 	return "没有等到 " + strings.Join(names, "、") + " 就绪"
 }
 
+// WaitText 把一次「等服务就绪」的结果说成一句人话。
+//
+// 三种没等到分开说（见 proc 里那三个常量），因为下一步动作各不相同：没配探针的
+// 要往清单里加 health、没在跑的该先去起它、探针没通的该去翻日志。合成一句
+// 「没就绪」，拿到它的人只知道继续等——而继续等下去正是这三件事里最没用的一件。
+//
+// 这一句只给 `pier wait` 用：它末尾那句「先起它：pier up X」是命令行的口气。
+// 本地接口与 MCP 的调用方另有自己的说法（WaitWhy / WaitMissed 那两句），
+// 但那两句也不各写一份——同一个结果换个入口换一种解释，读的人会以为是两回事。
+func WaitText(r proc.WaitResult, timeout time.Duration) string {
+	switch {
+	case r.Ready:
+		return "已就绪  " + r.Probe
+	case r.Why == proc.WaitNoProbe:
+		return "没配健康探针，等不到「就绪」这个信号（在清单里给它加 health）"
+	case r.Why == proc.WaitNotRunning:
+		return "没有在运行，先起它：pier up " + r.Name
+	case r.Why == proc.WaitTimeout:
+		return fmt.Sprintf("等满了 %s，探针还没通  %s（看它卡在哪一行：pier logs %s）",
+			Duration(timeout), r.Probe, r.Name)
+	}
+	// 剩下的只有「没有原因也不就绪」这一种，正常走不到；宁可如实说一句，
+	// 也不要回一句空字符串让人以为这一行是排版错乱。
+	return "没等到就绪"
+}
+
+// WaitWhy 是总结那行里跟在服务名后面的半句。
+//
+// 它把 WaitText 那几句压短，好让「没等到：」那一行不用换行——总结要能一眼扫过，
+// 否则它就只是把上面的输出又说了一遍。命令行的 `pier wait`、本地接口的响应与
+// MCP 的 wait_ready 回执都用这一句：三个入口的「没等到」必须是同一批字，
+// 各自写一份的话，同一个结果会在三处慢慢长成三种说法。
+func WaitWhy(r proc.WaitResult, timeout time.Duration) string {
+	switch r.Why {
+	case proc.WaitNoProbe:
+		return "没配探针"
+	case proc.WaitNotRunning:
+		return "没在跑"
+	case proc.WaitTimeout:
+		return fmt.Sprintf("%s 内没通过探针", Duration(timeout))
+	}
+	return "没等到就绪"
+}
+
+// WaitMissed 把没等到的那几个摊成「api（没在跑）、web（30s 内没通过探针）」，
+// 全都就绪时返回空串。
+//
+// 命令行的「没等到：」与 MCP 的 wait_ready 回执是同一句：同一个结果在两个入口
+// 各说一句，两边就都得各自维护一份「没等到有哪几种」。
+func WaitMissed(rs []proc.WaitResult, timeout time.Duration) string {
+	var missed []string
+	for _, r := range rs {
+		if r.Ready {
+			continue
+		}
+		missed = append(missed, r.Name+"（"+WaitWhy(r, timeout)+"）")
+	}
+	return strings.Join(missed, "、")
+}
+
 // ShortPath 把路径开头的用户主目录缩成 ~。
 //
 // 端口那一屏里几乎每一行都是主目录底下的项目目录，原样写出来一列要占掉半屏，
@@ -197,6 +305,26 @@ func OriginText(o *proc.Origin) string {
 		return Dash
 	}
 	return strings.Join(o.Chain, " ← ")
+}
+
+// TailText 取一段文本的最后 n 行，不足 n 行就整段返回。
+//
+// 末尾那个换行不算一行：日志就是一行一条记录，末尾多出来的那个换行会让人
+// 以为最后还空了一行，而「最后一行是空的」在排错时是个要解释的现象。
+//
+// 已有两个消费方（命令行的 tailLog 与 MCP 的 read_logs），都是「把一份日志
+// 的末尾交给对方」。各切一次的话，一处按 \n 切、一处按 \r\n 切，同一个文件
+// 在两个入口读出来的行数就会不一样。
+func TailText(s string, n int) string {
+	s = strings.TrimRight(s, "\n")
+	if n <= 0 || s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Bytes 把字节数压成「1.2 GB」这类紧凑形式，用于日志占用与清理回执。
