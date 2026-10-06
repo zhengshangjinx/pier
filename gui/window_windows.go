@@ -6,6 +6,8 @@ import (
 	"unsafe"
 
 	webview "github.com/webview/webview_go"
+
+	"github.com/zhengshangjinx/pier/internal/config"
 )
 
 // Windows 这一侧的窗口层。标题栏、拖拽、缩放都由系统画和管，
@@ -32,6 +34,22 @@ func resize(w webview.WebView, width, height int, hint webview.Hint) {
 // 拿得到（GetSystemMetrics），但要扣掉任务栏、还要按每屏 DPI 换算，为一个初始尺寸
 // 不值当——defaultWindowSize 拿到 0 时用的那档尺寸在任何屏幕上都不离谱。
 func screenVisible() (float64, float64) { return 0, 0 }
+
+// windowFrame 读窗口外框。Windows 这一份不做，只读不写，所以 watchWindowFrame
+// 在这里会当场收工（见 gui/window.go）。
+//
+// 记下来的位置能不能照搬，取决于**上次那块屏还在不在**：多屏改过排列、外接显示器
+// 拔了之后，那个坐标就是一块够不着的地方，窗口开在那儿用户连拖都拖不回来。
+// 要判这件事得知道每块屏的可用区域，而这一层现在量不到（见上面 screenVisible）。
+// 只记尺寸也不行：那就成了「尺寸记着、位置每次回到正中」，一半对一半错，
+// 比整体不做更难解释。
+//
+// 等这一层能量出屏幕与每屏 DPI（GetSystemMetrics 加上 per-monitor DPI 那套换算）
+// 再把读外框与摆位置一起补上——两件事要一起做，分开做只会做出上面那个半成品。
+func windowFrame(_ webview.WebView) (config.WindowBox, bool) { return config.WindowBox{}, false }
+
+// placeWindow 把窗口摆回上次的地方。同 windowFrame，这一层不做。
+func placeWindow(_ unsafe.Pointer, _ config.WindowBox) {}
 
 // applyChrome 刷窗口底色。WebView2 把内容区铺满客户区，露不出窗口底色。
 func applyChrome(_ unsafe.Pointer, r, g, b float64, dark bool) {}

@@ -216,6 +216,77 @@ static void pierCenterWindow(void *p) {
 	[w setFrame:f display:YES];
 }
 
+// pierWindowFrame 读出窗口的外框：尺寸与屏幕坐标，单位是点。
+//
+// 读的是 NSWindow 的 frame，不是网页那侧的 innerWidth / innerHeight。三平台的
+// webview_set_size 收的都是**外框**（macOS 走 setFrame、Windows 用
+// AdjustWindowRectExForDpi 把客户区换算成外框、GTK 直接 gtk_window_resize），
+// 而 innerWidth 是内容区，比外框少一圈标题栏与边框。拿内容区的尺寸喂回去，
+// 每重启一次窗口就缩掉一圈——所以这一份只在原生侧读写，界面完全不参与。
+static void pierWindowFrame(void *p, double *out) {
+	NSRect f = [(NSWindow *)p frame];
+	out[0] = f.size.width;
+	out[1] = f.size.height;
+	out[2] = f.origin.x;
+	out[3] = f.origin.y;
+}
+
+// pierPlaceWindow 把窗口摆回它上次待的那块地方。
+//
+// 上次那块屏可能已经不在了（外接显示器拔了、笔记本换了位置、屏幕重新排过）。
+// 照搬坐标会把窗口丢到谁也够不着的地方，用户连拖都拖不回来——那比不记更坏。
+// 所以先挑一块屏：与目标外框相交面积最大的那块；交出来的还不到窗口的一半，
+// 就当作那块屏没了，退回主屏正中（与初始摆位同一处）。
+//
+// 挑得着的那块，位置还要夹进它的可用区域：记下来的位置只保证「上次是合法的」，
+// 那时 Dock 可能没有这么高、菜单栏可能没这么宽，而外框大小这会儿也可能因为
+// 屏幕变小而被收过一道——不夹的话标题栏正好压在菜单栏底下，或者窗口大半探出去。
+//
+// 尺寸不在这儿判：那是 restoreWindowBox 的事，这里只管摆哪儿。
+static void pierPlaceWindow(void *p, double x, double y, double width, double height) {
+	NSWindow *win = (NSWindow *)p;
+	NSRect want = NSMakeRect(x, y, width, height);
+
+	NSScreen *best = nil;
+	CGFloat bestArea = 0;
+	for (NSScreen *s in [NSScreen screens]) {
+		NSRect hit = NSIntersectionRect(s.visibleFrame, want);
+		CGFloat area = hit.size.width * hit.size.height;
+		if (area > bestArea) {
+			bestArea = area;
+			best = s;
+		}
+	}
+	// 一块都没相交（包括 best 还没找到）时退回主屏。窗口比屏幕还大的时候，
+	// 「相交面积不足一半」也会落进这一支，那正是想要的：正中摆着最好够得着。
+	BOOL lost = bestArea * 2 < width * height;
+	if (lost) {
+		best = pierMainScreen();
+	}
+
+	NSRect f = win.frame;  // 位置先留着原样：下面问不到屏幕时就照它摆
+	f.size.width = width;
+	f.size.height = height;
+	if (best == nil) {
+		[win setFrame:f display:YES];
+		return;
+	}
+	NSRect vf = best.visibleFrame;
+	if (lost) {
+		f.origin.x = vf.origin.x + (vf.size.width - width) / 2;
+		f.origin.y = vf.origin.y + (vf.size.height - height) / 2;
+	} else {
+		f.origin = want.origin;
+	}
+	if (f.origin.x + width > NSMaxX(vf)) f.origin.x = NSMaxX(vf) - width;
+	if (f.origin.y + height > NSMaxY(vf)) f.origin.y = NSMaxY(vf) - height;
+	// 夹回来这一步必须在上一对之后：窗口比可用区域还大时，上面两句会把它推到
+	// 左边界外面去，与 pierCenterWindow 里同样的次序。
+	if (f.origin.x < NSMinX(vf)) f.origin.x = NSMinX(vf);
+	if (f.origin.y < NSMinY(vf)) f.origin.y = NSMinY(vf);
+	[win setFrame:f display:YES];
+}
+
 // 底色跟着界面的主题走；外观（亮/暗）也要一起切，否则暗色下红黄绿三个按钮
 // 和窗口阴影还是亮色那一套，一眼就能看出是两层东西。
 static void pierSetChrome(void *p, double r, double g, double b, int dark) {
@@ -230,6 +301,8 @@ import (
 	"unsafe"
 
 	webview "github.com/webview/webview_go"
+
+	"github.com/zhengshangjinx/pier/internal/config"
 )
 
 // nativeWindowChrome 为真表示页面铺到了标题栏底下，顶上那一条由原生代码接管
@@ -259,6 +332,39 @@ func resize(w webview.WebView, width, height int, hint webview.Hint) {
 	if win := w.Window(); win != nil {
 		C.pierFullSizeContentView(win)
 	}
+}
+
+// windowFrame 读窗口此刻的外框；读不到（窗口还没建出来）时 ok 为假。
+//
+// AppKit 只认主线程，所以这一步要过 Dispatch。Dispatch 是投递出去就返回的，
+// 用一条带缓冲的通道把结果接回来——它自己也可能是从主线程调进来的（启动那一次
+// 就是），那时若用无缓冲通道就是死锁。
+func windowFrame(w webview.WebView) (config.WindowBox, bool) {
+	ch := make(chan config.WindowBox, 1)
+	w.Dispatch(func() {
+		win := w.Window()
+		if win == nil {
+			ch <- config.WindowBox{}
+			return
+		}
+		var out [4]C.double
+		C.pierWindowFrame(win, &out[0])
+		ch <- config.WindowBox{
+			W: int(out[0]), H: int(out[1]),
+			X: int(out[2]), Y: int(out[3]),
+		}
+	})
+	box := <-ch
+	return box, box.W > 0 && box.H > 0
+}
+
+// placeWindow 把窗口摆回上次待过的地方。必须在主线程上、styleWindow 之后调用：
+// 那里面有一次居中，摆早了会被它顶掉。
+func placeWindow(win unsafe.Pointer, box config.WindowBox) {
+	if win == nil {
+		return
+	}
+	C.pierPlaceWindow(win, C.double(box.X), C.double(box.Y), C.double(box.W), C.double(box.H))
 }
 
 // screenVisible 主屏可用区域（扣掉菜单栏与 Dock），拿不到时返回 0。

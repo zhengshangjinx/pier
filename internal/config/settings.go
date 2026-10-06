@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // SettingsName 是界面偏好文件名，和 services.json 在同一个数据目录里。
@@ -48,6 +49,35 @@ type Settings struct {
 	// 默认开是因为它只在真出事时响（异常退出、重启到上限、启动失败）：
 	// 一个天天在跑的服务崩了，用户多半不在终端面前，而这件事只有通知能追到他。
 	Notify bool `json:"notify"`
+
+	// Page 是上次关窗时停在哪儿："" 表示「全部服务」，否则是分组名。
+	//
+	// 存的是名字而不是下标：分组会增删改名，一个位置第二天可能指到别的分组上。
+	// 那一页已经没了就退回「全部服务」（见 gui/app.js 里挑初值那一段）。
+	Page string `json:"page,omitempty"`
+
+	// Window 是上次关窗时的窗口外框，全零表示还没记过（第一次运行）。
+	//
+	// 记在偏好里而不是另开一个文件：这是「我的窗口摆在哪」，与主题同一类东西，
+	// 而且它必须和别的偏好共用一个「读—改—写」（见 UpdateSettings）。
+	//
+	// omitzero 只在整块为零时省掉它；里面四个数**不能**加 omitempty——
+	// 窗口正好摆在屏幕左上角时 x/y 就是 0，省掉之后下次启动会跑到别处去。
+	Window WindowBox `json:"window,omitzero"`
+}
+
+// WindowBox 是一块窗口外框：尺寸与屏幕坐标。
+//
+// 尺寸是**外框**（含标题栏与边框），不是内容区：三平台的 webview_set_size
+// 收的都是外框（macOS 走 setFrame、Windows 用 AdjustWindowRectExForDpi 把客户区
+// 换算成外框、GTK 直接 gtk_window_resize），而页面上拿到的 innerWidth 是内容区。
+// 拿内容区的尺寸喂回去，Windows 上每重启一次就各缩掉一圈装饰边框。
+// 所以这一份只在原生侧读写，界面不参与。
+type WindowBox struct {
+	W int `json:"w"`
+	H int `json:"h"`
+	X int `json:"x"`
+	Y int `json:"y"`
 }
 
 // SettingsPath 返回默认数据目录下的偏好文件路径。
@@ -87,9 +117,24 @@ func LoadSettings(path string) (Settings, error) {
 	return s, nil
 }
 
+// settingsMu 串起对偏好文件的「读—改—写」。
+//
+// 写偏好的人不止一个，而且各改各的一项：界面上那个开关、更新里跳过的版本、
+// 本地接口的令牌与端口、窗口外框那条轮询。整份读进来、改一项、整份写回去，
+// 中间那一段若不挡着，两个人就会各拿着同一份旧内容往回写——后写的那一份
+// 把先写的那个改动抹掉，而两边都报成功。窗口外框那条每几秒就写一次，
+// 撞上别的写者的机会一点都不小。
+//
+// 锁活在进程里而不是文件上：要防的是同一个进程里两条协程对撞。
+// 两个界面同时开着是另一回事（各自的窗口外框会互相盖），不值当为它引文件锁——
+// 那要处理死锁与陈旧锁，代价远大于「两个窗口谁最后挪谁说了算」。
+var settingsMu sync.Mutex
+
 // UpdateSettings 读出偏好、交给 fn 修改、再整份写回。
 // 主题、SDK 各改各的，谁都不该因为只知道自己那一项就把别的项写没了。
 func UpdateSettings(path string, fn func(*Settings)) error {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	s, err := LoadSettings(path)
 	if err != nil {
 		return err

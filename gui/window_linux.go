@@ -8,6 +8,8 @@ import (
 	"unsafe"
 
 	webview "github.com/webview/webview_go"
+
+	"github.com/zhengshangjinx/pier/internal/config"
 )
 
 // Linux 这一侧的窗口层。macOS 那边（window_darwin.go）要装菜单栏、垫原生拖拽条、
@@ -39,6 +41,22 @@ func resize(w webview.WebView, width, height int, hint webview.Hint) {
 // 拿不到：webview 在 Linux 上只暴露窗口本身，屏幕尺寸要去问 GTK 或 X11，
 // 为这一个数把 cgo 伸进 GTK 不划算。defaultWindowSize 会在拿到 0 时用默认那档尺寸。
 func screenVisible() (float64, float64) { return 0, 0 }
+
+// windowFrame 读窗口外框。Linux 这一份不做，只读不写，所以 watchWindowFrame
+// 在这里会当场收工（见 gui/window.go）。两条理由，第二条是这一平台独有的：
+//
+// 一是判不了「上次那块屏还在不在」——多屏改过排列之后，记下来的坐标就是一块
+// 够不着的地方，而这一层量不到屏幕（见上面 screenVisible），没法在照搬之前拦一道；
+// 只记尺寸则成了「尺寸记着、位置每次回到正中」，一半对一半错。
+//
+// 二是 Wayland 下窗口位置根本不归客户端管：合成的窗口管理器会忽略移动请求
+// （xdg-shell 里压根没有这一条），摆过去也不生效。真要在 X11 下做，还得先分清
+// 跑在哪一套里——为一件只有一半会话能用的事写两套判断，不如等屏幕尺寸这件事
+// 在这一层立起来之后一起做。
+func windowFrame(_ webview.WebView) (config.WindowBox, bool) { return config.WindowBox{}, false }
+
+// placeWindow 把窗口摆回上次的地方。同 windowFrame，这一层不做。
+func placeWindow(_ unsafe.Pointer, _ config.WindowBox) {}
 
 // applyChrome 刷窗口底色。GTK 的窗口底色由主题决定，网页自己铺满整块内容区，
 // 露不出底色，这里不需要跟着页面主题走。

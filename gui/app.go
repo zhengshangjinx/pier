@@ -385,6 +385,12 @@ type settingsPatch struct {
 	Theme       *string `json:"theme"`
 	UpdateCheck *bool   `json:"updateCheck"`
 	Notify      *bool   `json:"notify"`
+	// Page 是界面上停在哪一页（分组名，空串是「全部服务」）。
+	//
+	// 这里不校验它是不是一个真存在的分组：那一头要读清单才知道，而界面手里的
+	// 那份状态比这一层新（用户刚建完一个分组就点进去，落盘的那份还是旧的）。
+	// 真正使用这个值时才知道分组还在不在（见 app.js 里核对那一页的那一段）。
+	Page *string `json:"page"`
 }
 
 // saveSettings 保存界面偏好，接一个 JSON 对象（{"theme":"dark"} / {"updateCheck":false}）。
@@ -413,6 +419,9 @@ func (a *app) saveSettings(patch string) string {
 		}
 		if in.Notify != nil {
 			s.Notify = *in.Notify
+		}
+		if in.Page != nil {
+			s.Page = *in.Page
 		}
 	})
 	if err != nil {

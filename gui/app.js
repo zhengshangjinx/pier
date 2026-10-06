@@ -956,6 +956,19 @@
     return !saved || saved.notify !== false;
   }
 
+  // 「上次停在哪一页」与主题同一份注入。空串是「全部服务」，否则是一个分组名，
+  // 或者是 SDK / 日志 / 偏好设置那三个保留值。
+  //
+  // 存名字而不是下标：分组会增删改名，一个位置第二天可能就指到别的分组上了。
+  // 代价是存下来的那一页可能已经没了，那要等第一轮状态回来才判得出来，
+  // 见 App 里核对那一页的那一段。
+  //
+  // 演示页没有后端注入，退回「全部服务」。
+  function initialPage() {
+    var saved = window.__PIER_SETTINGS__;
+    return (saved && typeof saved.page === "string" && saved.page) ? saved.page : "all";
+  }
+
   function useTheme() {
     var st = React.useState(initialTheme);
     var pref = st[0], setPref = st[1];
@@ -4028,7 +4041,7 @@
     var st = React.useState(null), data = st[0], setData = st[1];
     var es = React.useState(""), stateErr = es[0], setStateErr = es[1];
     var bs = React.useState(""), banner = bs[0], setBanner = bs[1];
-    var sel = React.useState("all"), selected = sel[0], setSelected = sel[1];
+    var sel = React.useState(initialPage), selected = sel[0], setSelected = sel[1];
     var lg = React.useState({ open: false, name: "" }), log = lg[0], setLog = lg[1];
     var po = React.useState({ open: false, name: "" }), portOwner = po[0], setPortOwner = po[1];
     var fm = React.useState({ open: false, editing: null }), form = fm[0], setForm = fm[1];
@@ -4481,6 +4494,36 @@
     // 说的都是本机的东西，不是某一组服务，所以启停按钮与副标题的计数同样撤掉。
     var onSettingsPage = selected === SETTINGS_KEY;
     var onToolPage = onSDKPage || onLogPage || onSettingsPage;
+
+    // ── 上次停在哪一页 ────────────────────────────────────────────────────
+    //
+    // 初值来自注入的偏好（见 initialPage）。存的是分组名，于是有两个时刻要照看：
+    // 存下来的那一页还在不在，以及用户这会儿停在哪。
+    //
+    // 「还在不在」只能等第一轮状态回来才知道：分组被删了、改名了，或者这次用的是
+    // 另一份清单（偏好是本机的，清单可以是 --config 指过来的）。这时主区是空的、
+    // 侧栏上也没有哪一项是选中的，看着像坏了，所以退回「全部服务」。
+    //
+    // 只核对一次：这是启动时的一次校正，不是一条跟着分组走的规则。用户正看着的
+    // 分组被删掉时另有既有的那一处处理（见下面删分组的分支里的 setSelected）。
+    var pageChecked = React.useRef(false);
+    React.useEffect(function () {
+      if (!data || pageChecked.current) return;
+      pageChecked.current = true;
+      if (selected === "all" || onToolPage || cur) return;
+      setSelected("all");
+    }, [data, cur, selected, onToolPage]);
+
+    // 换页记一笔。第一轮不写：那一次的值本来就是从偏好里读出来的，原样写回去
+    // 白改一次文件。其余每一次都写，包括上面那条校正退回「全部服务」的那一次
+    // ——存着的那个分组真没了，就该把这一笔改掉。
+    var pageSaved = React.useRef(false);
+    React.useEffect(function () {
+      if (!pageSaved.current) { pageSaved.current = true; return; }
+      // 写不进去就算了：这是顺手记的一笔，为它弹一条错误比不记更烦人。
+      call("saveSettings", JSON.stringify({ page: selected === "all" ? "" : selected }))
+        .catch(function () {});
+    }, [selected]);
 
     var title = onSDKPage ? "SDK 管理"
       : onLogPage ? "日志管理"

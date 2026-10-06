@@ -15,6 +15,7 @@ import (
 
 	webview "github.com/webview/webview_go"
 
+	"github.com/zhengshangjinx/pier/internal/config"
 	"github.com/zhengshangjinx/pier/internal/update"
 )
 
@@ -46,9 +47,21 @@ func main() {
 	w.SetTitle("Pier")
 	// 尺寸先定、样式后铺：webview 的 SetSize 会把窗口掩码整个换掉，
 	// 早铺好的全尺寸内容视图会被它抹掉（见 window_darwin.go 的 resize）。
+	//
+	// 上次关窗时的外框（见 gui/window.go）在这一段里接回来。尺寸得赶在 resize
+	// 之前收好，位置却要等 styleWindow 铺完再摆——它里面有一次居中，摆早了会被
+	// 那次居中顶掉。读不出外框的平台（Windows / Linux）这一块整个是空的：
+	// haveBox 为假，宽度高度还是 defaultWindowSize 算出来的。
 	width, height := defaultWindowSize()
+	box, haveBox := restoreWindowBox(config.DefaultSettings().Window)
+	if haveBox {
+		width, height = box.W, box.H
+	}
 	resize(w, width, height, webview.HintNone)
 	styleWindow(w.Window())
+	if haveBox {
+		placeWindow(w.Window(), box)
+	}
 	// 先按亮色刷一遍，页面挂载后会按实际主题再刷：不先刷的话，暗色启动的那一瞬
 	// 标题栏是系统默认的灰，和页面对不上。（只在 macOS 上有效果，另外两个平台的
 	// 底色露不出来，见各自的 applyChrome。）
@@ -84,6 +97,12 @@ func main() {
 	stopUpdate := make(chan struct{})
 	defer close(stopUpdate)
 	go a.up.AutoCheck(update.AutoFirst, update.AutoEvery, stopUpdate)
+
+	// 窗口外框每 1.5 秒看一眼，挪过就记进偏好。同一个窗口只有一个写者，
+	// 关窗即止（这一条的说明见 watchWindowFrame）。
+	stopFrame := make(chan struct{})
+	defer close(stopFrame)
+	go watchWindowFrame(w, box, stopFrame)
 
 	// 绑定失败会让界面上的按钮静默失效——那是最难排查的一类故障，
 	// 所以这里失败必须留下痕迹。绑定清单见 app.go 的 bindings()，
