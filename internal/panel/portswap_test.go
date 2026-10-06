@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,20 +39,76 @@ services:
     run: sleep 300
 `
 
+// 端口为什么不用 :0 让内核发一个。
+//
+// 这一段用例对端口有两个别处没有的要求：「清单里那个 +1」得是空的（StartOnPort
+// 从那儿往上找让路端口，再做一次占用确认），以及「放开之后它得一直是空的」
+// （resumePort 当场要读到 0）。内核发的号落在临时端口段里（macOS 从 49152 起、
+// Linux 默认从 32768 起），本机随便谁随手一次 :0——包括并行跑着的其它用例——
+// 就能把这两条同时毁掉，而拿走的那个端口与被测的事毫无关系。
+// 所以这一段取在临时端口段以下，内核不往这儿发。
+const (
+	portBandFirst = 20000
+	portBandLimit = 30000
+	portBandSize  = 100
+)
+
+// portBand 划出这个测试进程专属的一段端口（[portBandBase, +portBandSize)）。
+//
+// 段头那个端口一直绑着不放：它就是这一段的占位，谁先绑到归谁，并行跑着的另一个
+// 测试进程随即往下一段去。留在这个变量里而不是就地丢掉，是因为 net 的 fd 上有终结器
+// ——没人引用的 Listener 会被 GC 关掉，那一段就跟着回到「空闲」。
+//
+// 不划段、让各个进程都从同一号往上扫，就回到那个问题上：谁抢到哪一号是不定的，
+// 我们放开清单里那个端口的一瞬间，正在往下扫的另一个人正好把它绑走，resumePort
+// 随即读到「还占着」——用例红在一件与被测逻辑无关的事上。并行压测里几个
+// panel.test 全挤在同一串号上是常态。
+var (
+	portBandOnce   sync.Once
+	portBandAnchor net.Listener
+	portBandBase   int
+)
+
+func portBand(t *testing.T) int {
+	t.Helper()
+	portBandOnce.Do(func() {
+		for base := portBandFirst; base+portBandSize <= portBandLimit; base += portBandSize {
+			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", base))
+			if err != nil {
+				continue
+			}
+			portBandAnchor, portBandBase = ln, base
+			return
+		}
+	})
+	if portBandAnchor == nil {
+		t.Fatalf("%d 起找不到一段空闲端口", portBandFirst)
+	}
+	return portBandBase
+}
+
 // holdPort 真的占住一个端口，返回它的号码与一个提前放开它的函数（用例结束时
 // 也会再放一次，重复关闭无妨）。
 //
 // 放开这一步要能提前做，是因为「占用的进程走了之后该回到清单里那个端口」
 // 正是要验的一半——那一条只能在占用消失之后跑。
+//
+// 只在自己那一段里找：段内没有别的进程会来看（见 portBand），拿到手的几个号
+// 也就一直是我们几个。
 func holdPort(t *testing.T) (int, func()) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("占端口失败：%v", err)
+	base := portBand(t)
+	for port := base + 1; port < base+portBandSize; port++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		release := func() { _ = ln.Close() }
+		t.Cleanup(release)
+		return port, release
 	}
-	release := func() { _ = ln.Close() }
-	t.Cleanup(release)
-	return ln.Addr().(*net.TCPAddr).Port, release
+	t.Fatalf("%d 这一段里找不到一个能绑的端口", base)
+	return 0, nil
 }
 
 // freePort 要一个此刻没人听的端口号。
