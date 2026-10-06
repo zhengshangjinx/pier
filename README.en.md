@@ -108,6 +108,26 @@ process group.
   page you happen to have open: its JS can reach `127.0.0.1`, but a cross-origin request with a
   custom header needs a preflight, and this server never answers CORS.
 
+### MCP
+
+- `pier mcp` speaks MCP (Model Context Protocol) over stdin/stdout for clients such as
+  Claude Code: seven tools — `list_services` / `service_status` / `start_service` /
+  `stop_service` / `restart_service` / `read_logs` / `wait_ready` — driving the same
+  services as the UI and `pier api`.
+- **stdio, no port, no token**: the process using it is already on this machine and that
+  pipe is the one the client handed us; every extra port is one more thing to protect.
+  In a client config it is a single command:
+
+  ```json
+  { "command": "pier", "args": ["mcp"] }
+  ```
+
+- "Did not become ready" is an **answer** from `wait_ready`, not a failed call: which
+  services missed and where each one stalled (no probe configured / not running / probe
+  still closed at the deadline) come back in the reply, each with the step that follows.
+- A manifest that fails to load does not stop it: `list_services` reports the reason
+  instead of exiting, which on the client side would only look like "cannot connect".
+
 ### Toolchains
 
 - Service kinds: Go, Java (Maven multi-module), Node, Python, and arbitrary shell commands.
@@ -329,6 +349,7 @@ with macOS; the bundle is ad-hoc signed, which is enough for local use), and
 | `pier logs --clean [service] [--all]` | Remove logs older than 14 days; `--all` clears everything |
 | `pier ui` | Open the interactive terminal panel |
 | `pier api` | Serve a loopback-only HTTP API (`--show-token` / `--rotate` / `--port N` / `--addr <host>`) |
+| `pier mcp` | Speak MCP over stdin/stdout, handing start/stop and logs to an AI client |
 | `pier version` | Print the version (`pier --version` means the same) |
 | `pier update --check` | Check for a newer release without installing: exit code 0 up to date, 10 update available, 1 check failed |
 | `pier update` | Download, verify and swap in the latest release |

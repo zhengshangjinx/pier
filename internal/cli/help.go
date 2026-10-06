@@ -179,6 +179,18 @@ var commands = []command{
 		},
 	},
 	{
+		name:  "mcp",
+		usage: []usage{{"mcp", "在标准输入输出上说 MCP，给 Claude Code 这类客户端用"}},
+		desc:  "在标准输入输出上说 MCP（Model Context Protocol），把启停与日志交给 AI 客户端。",
+		notes: []string{
+			"走 stdin / stdout，不开端口、不发令牌：用它的进程就在本机，那条管道是它自己给的。",
+			"七个工具：list_services、service_status、start_service、stop_service、" +
+				"restart_service、read_logs、wait_ready。",
+			"写在客户端配置里就是一个命令：\"command\": \"pier\", \"args\": [\"mcp\"]。",
+			"与界面、pier api 是同一个位置上的三种宿主，起的是同一批服务。",
+		},
+	},
+	{
 		name:  "version",
 		usage: []usage{{"version", "显示版本号"}},
 		desc:  "显示版本号。",

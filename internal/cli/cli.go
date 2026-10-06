@@ -28,6 +28,7 @@ var handlers = map[string]func([]string) int{
 	"logs":           cmdLogs,
 	"ui":             cmdUI,
 	"api":            cmdApi,
+	"mcp":            cmdMcp,
 	"version":        cmdVersion,
 	"update":         cmdUpdate,
 	update.ApplyVerb: update.RunHelper,

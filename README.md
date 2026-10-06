@@ -93,6 +93,23 @@ Pier 把它们拿出来，变成一份清单加一个常驻的轻量入口：
   `--addr` 想换的只是**哪一个**回环地址（`::1`、`127.0.0.2` 这类），别的值当场报错——
   这条约束是代码拦的，不靠 README 提醒。
 
+### MCP
+
+- `pier mcp` 在标准输入输出上说 MCP（Model Context Protocol），给 Claude Code 这类
+  客户端用：七个工具 `list_services` / `service_status` / `start_service` / `stop_service` /
+  `restart_service` / `read_logs` / `wait_ready`，起的是与界面、`pier api` 同一批服务。
+- **走 stdio，不开端口、不发令牌**：用它的进程就在本机，那条管道是客户端自己给的，
+  多开一个端口就多一份要保护的东西。写进客户端配置就是一个命令：
+
+  ```json
+  { "command": "pier", "args": ["mcp"] }
+  ```
+
+- 「没等到就绪」是 `wait_ready` 的一个**答案**，不是调用失败：哪几个没到、各自卡在哪一步
+  （没配探针 / 没在跑 / 到点还没探通）都写在回执里，下一步该做什么跟着分开说。
+- 清单读不动也照样起来：`list_services` 会把原因一并说出来，而不是当场退出——
+  客户端那边的表现是一句「连不上」，看不出是清单写错了。
+
 ### 多语言与工具链
 
 - 服务类型：Go、Java（Maven 多模块）、Node、Python，以及任意 shell 命令。
@@ -296,6 +313,7 @@ ln -s /Applications/Pier.app/Contents/MacOS/pier /usr/local/bin/pier   # 要 /us
 | `pier logs --clean [服务] [--all]` | 清理超过 14 天的日志；`--all` 清空 |
 | `pier ui` | 打开终端里的交互式面板 |
 | `pier api` | 起一个只服务本机的 HTTP 接口（`--show-token` / `--rotate` / `--port N` / `--addr <回环主机>`） |
+| `pier mcp` | 在标准输入输出上说 MCP，把启停与日志交给 AI 客户端 |
 | `pier version` | 显示版本号（`pier --version` 同一个意思） |
 | `pier update --check` | 查一下有没有新版本，只查不装：退出码 0 已是最新，10 有新版本，1 没查成 |
 | `pier update` | 下载、校验并换上最新版本 |
