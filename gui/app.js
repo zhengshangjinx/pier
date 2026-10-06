@@ -34,6 +34,8 @@
     reveal: window.pierReveal,
     revealLog: window.pierRevealLog,
     revealLogs: window.pierRevealLogs,
+    // 整份日志另存一份（抽屉里那个复制按钮复制的是已显示的那一段，两者不是一回事）
+    exportLog: window.pierExportLog,
     revealConfig: window.pierRevealConfig,
     openHealth: window.pierOpenHealth,
     portOwner: window.pierPortOwner,
@@ -749,6 +751,10 @@
       case "configYAML":
         return { ok: true, text: "# Pier 清单 · 导出 2026-10-01\ntoolchain: {}\nservices:\n" };
       case "exportConfig": return { ok: true, msg: "已导出到 /Users/you/Desktop/pier.yaml" };
+      // 日志导出：报的是整份的大小，与抽屉里那一段不是一回事——消息里带上它，
+      // 正是为了让这个区别在界面上看得见。
+      case "exportLog": return { ok: true,
+        msg: "已导出 12.4 MB 到 /Users/you/Desktop/pier-" + args[0] + "-2026-09-29.log" };
       case "openConfig": return { ok: true, msg: "已加载 /Users/you/Desktop/pier.yaml" };
       case "useLocalConfig": return { ok: true, msg: "已切回本机数据" };
       case "prune": return { ok: true, msg: "没有需要清理的记录" };
@@ -3576,10 +3582,20 @@
       setHitIdx(0);
       load();
     };
-    var copyAll = function () {
+    // 复制的就是抽屉里这一段。日志很长时后端只给末尾 2000 行 / 256 KB
+    // （panel.LogLines / LogBytes），所以这里不能叫「复制全部」——那句话在长日志上
+    // 是假的，而用户是照着它去粘一份完整日志的。要整份就点旁边的「导出…」。
+    var copyShown = function () {
       if (!d.text) return;
       call("copyText", d.text).then(function () {
-        props.message.success("已复制 " + d.text.split("\n").length + " 行");
+        props.message.success("已复制显示的 " + d.text.split("\n").length + " 行");
+      }).catch(function (ex) { props.message.error(ex.message); });
+    };
+    var exportLog = function () {
+      if (!name) return;
+      call("exportLog", name, d.date || "").then(function (r) {
+        if (r && r.canceled) return;
+        props.message.success((r && r.msg) || "已导出");
       }).catch(function (ex) { props.message.error(ex.message); });
     };
 
@@ -3632,10 +3648,13 @@
         <span className="dc-log-gap"/>
         <${A.Checkbox} checked=${wrap}
           onChange=${function (ev) { setWrap(ev.target.checked); }}>自动换行<//>
-        <${A.Button} onClick=${copyAll} disabled=${!d.text}>复制全部<//>
+        <${A.Button} onClick=${copyShown} disabled=${!d.text}
+          title="只复制这里显示的这一段。日志很长时更早的部分不在其中，要整份用「导出…」">复制显示内容<//>
+        <${A.Button} onClick=${exportLog}
+          title="把这一整份日志文件另存到别处（不是只存上面显示的那一段）">导出…<//>
       </div>
       ${d.truncated ? html`<${A.Alert} type="info" showIcon style=${{ marginBottom: 10 }}
-        message=${"日志很长，这里只显示末尾部分。完整内容用「在" + FILEMGR + "中显示」打开。"}/>` : null}
+        message=${"日志很长，这里只显示末尾部分。要整份就点「导出…」，或者用「在" + FILEMGR + "中显示」打开它。"}/>` : null}
       ${d.text ? html`<pre className=${"dc-log" + (wrap ? "" : " dc-log-nowrap")} ref=${preRef}
           onScroll=${onScroll}>${spans}</pre>`
         : loading ? html`<div className="dc-log-wait"><${A.Spin}/></div>`

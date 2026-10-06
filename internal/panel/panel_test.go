@@ -908,6 +908,47 @@ func TestLogsRejectsUnknownService(t *testing.T) {
 	}
 }
 
+// TestLogPathPinsDayAndDirectory 盯住「导出」取的是哪一份文件。
+//
+// 它与读日志共用 logPathFor，所以防越界也钉在这里：日期不是「年-月-日」那个形状时
+// 退回「此刻在写的那一份」，绝不拿它去拼路径——导出会把整份内容拷到用户挑的地方，
+// 拼错一次的代价比读错一次大得多。
+func TestLogPathPinsDayAndDirectory(t *testing.T) {
+	h := newHarness(t)
+	cfg := h.p.Config()
+	if err := os.MkdirAll(cfg.LogDirFor("alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	current := proc.LogFile(cfg, "alpha")
+	yesterday := time.Now().AddDate(0, 0, -1).Format(config.LogDateLayout)
+
+	got, err := h.p.LogPath("alpha", yesterday)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := cfg.LogPathDate("alpha", yesterday); got != want {
+		t.Errorf("给了日期就该取那一天：%s，想要 %s", got, want)
+	}
+
+	// 认不出的日期一律当作没给。这几个都是「顺手拿去拼一下」会出事的值。
+	for _, bad := range []string{"../alpha", "/etc/passwd", "2026-9-9", "2026-02-30", ".."} {
+		got, err := h.p.LogPath("alpha", bad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != current {
+			t.Errorf("日期 %q 应当被当作没给（退回 %s），实际取到 %s", bad, current, got)
+		}
+		if !strings.HasPrefix(got, cfg.LogDir()+string(filepath.Separator)) {
+			t.Errorf("日期 %q 把路径带出日志目录了：%s", bad, got)
+		}
+	}
+
+	if _, err := h.p.LogPath("根本没有这个服务", ""); err == nil {
+		t.Error("服务名不存在时应当报错")
+	}
+}
+
 func TestTailFileKeepsOnlyTheTail(t *testing.T) {
 	dir := t.TempDir()
 

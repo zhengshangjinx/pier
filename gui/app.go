@@ -11,6 +11,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/zhengshangjinx/pier/internal/config"
@@ -19,6 +21,7 @@ import (
 	"github.com/zhengshangjinx/pier/internal/proc"
 	"github.com/zhengshangjinx/pier/internal/sysopen"
 	"github.com/zhengshangjinx/pier/internal/update"
+	"github.com/zhengshangjinx/pier/internal/view"
 )
 
 // app 是界面层的宿主状态。除了窗口句柄，它只剩一个面板内核和它的编辑入口。
@@ -131,6 +134,8 @@ func (a *app) bindings() []binding {
 		{"pierReveal", a.reveal},
 		{"pierRevealLog", a.revealLog},
 		{"pierRevealLogs", a.revealLogs},
+		// 把整份日志另存一份（不是抽屉里显示的那一段）
+		{"pierExportLog", a.exportLog},
 		{"pierRevealConfig", a.revealConfig},
 		{"pierOpenHealth", a.openHealth},
 		// 应用管理与端口占用
@@ -335,6 +340,67 @@ func (a *app) revealLogs() string {
 		return errJSON("尚未加载服务清单")
 	}
 	return open(cfg.LogDir(), false)
+}
+
+// exportLog 把某一天的整份日志另存到用户挑的位置。
+//
+// 与抽屉里那个复制按钮分得清清楚楚：抽屉一次只读末尾 2000 行 / 256 KB
+// （panel.LogLines / LogBytes），复制的就是那一段；这里走的是文件本身，
+// 一个字节不少。日志单日能到几百 MB，所以两边都不是「先把整份读进内存」。
+//
+// 默认文件名带上服务名与日期：导出的常常是「拿给别人看」的那一份，
+// 名字里得有这两样，否则几天后自己也认不出这是哪个服务的哪天。
+func (a *app) exportLog(name, date string) string {
+	path, err := a.panel.LogPath(name, date)
+	if err != nil {
+		return errJSON(err.Error())
+	}
+	// 先确认文件在，再去弹存储框：让用户挑完位置才说「这一天没有日志」，
+	// 那一下点击是白点的。
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+		return errJSON("这一天还没有日志文件")
+	}
+
+	picked, canceled, err := pickSavePath("pier-" + name + "-" + filepath.Base(path))
+	if err != nil {
+		return errJSON("打开存储对话框失败：" + err.Error())
+	}
+	if canceled || picked == "" {
+		return marshal(map[string]any{"ok": true, "canceled": true})
+	}
+	n, err := exportLogTo(path, picked)
+	if err != nil {
+		return errJSON("导出失败：" + err.Error())
+	}
+	return okJSON("已导出 " + view.Bytes(n) + " 到 " + picked)
+}
+
+// exportLogTo 把整份日志从 src 拷到 dst，返回字节数。
+//
+// 单独拿出来是为了能测：这里唯一的要求就是「整份」，而不是抽屉里那段被截过的。
+// 拷贝途中出错就把半份删掉——留着一个看着像日志、实际少了后半截的文件，
+// 比明说失败更坏。
+func exportLogTo(src, dst string) (int64, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	n, err := io.Copy(out, in)
+	if err != nil {
+		out.Close()
+		os.Remove(dst)
+		return 0, err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return 0, err
+	}
+	return n, nil
 }
 
 // revealConfig 在访达里打开数据目录（~/.pier）；命令行指定 YAML 时显示那份文件。

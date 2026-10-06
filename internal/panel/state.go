@@ -426,14 +426,7 @@ func (p *Panel) Logs(name, date string, since int64) (LogOut, error) {
 	}
 	out := LogOut{OK: true, Dates: proc.LogDates(cfg.LogDirFor(name))}
 
-	path := proc.LogFile(cfg, name)
-	// 日期只用来拼文件名，所以先确认它是「年-月-日」那个形状：
-	// 认不出的串一律当作没给，免得随便传个 ../.. 就读到别处的文件去。
-	if date != "" {
-		if _, err := time.Parse(config.LogDateLayout, date); err == nil {
-			path = cfg.LogPathDate(name, date)
-		}
-	}
+	path := logPathFor(cfg, name, date)
 	out.Path, out.Date = path, logDateOf(path)
 
 	fi, err := os.Stat(path)
@@ -480,6 +473,22 @@ func (p *Panel) Logs(name, date string, since int64) (LogOut, error) {
 	}
 	out.Text, out.Truncated, out.Offset, out.Reset = text, truncated, size, true
 	return out, nil
+}
+
+// logPathFor 按「服务 + 哪一天」算出日志文件的路径。
+//
+// date 为空表示「它此刻在写的那一份」。日期只用来拼文件名，所以先确认它是
+// 「年-月-日」那个形状：认不出的串一律当作没给，免得随便传个 ../.. 就读到别处的文件去。
+//
+// 读日志（Logs）与导出整份（LogPath）共用这一条：两处各写一遍的话，
+// 防越界的那一句迟早只在其中一处。
+func logPathFor(cfg *config.Config, name, date string) string {
+	if date != "" {
+		if _, err := time.Parse(config.LogDateLayout, date); err == nil {
+			return cfg.LogPathDate(name, date)
+		}
+	}
+	return proc.LogFile(cfg, name)
 }
 
 // logDateOf 从 <年-月-日>.log 这个路径里取出那一天；认不出就是空串

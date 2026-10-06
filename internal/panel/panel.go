@@ -1385,11 +1385,20 @@ func (p *Panel) ServiceDir(name string) (string, error) {
 // 拿的是最新的一份而不是今天那份：跨了零点还在跑的服务写的一直是启动那天的文件，
 // 「在访达中显示」应该跳到那个真实存在的文件上。
 func (p *Panel) ServiceLogPath(name string) (string, error) {
+	return p.LogPath(name, "")
+}
+
+// LogPath 返回某个服务某一天的日志文件路径（date 为空＝此刻在写的那一份）。
+//
+// 给「导出」用：导出要的是整份文件，不该像 Logs 那样先把末尾那 256 KB 读进来
+// 再丢掉——那也正是抽屉里那个复制按钮的边界，两者不能共用一条读数路径。
+// 日期的口径与 Logs 完全一致（共用 logPathFor），所以这里的 date 同样进不了路径。
+func (p *Panel) LogPath(name, date string) (string, error) {
 	_, cfg, err := p.Lookup(name)
 	if err != nil {
 		return "", err
 	}
-	return proc.LogFile(cfg, name), nil
+	return logPathFor(cfg, name, date), nil
 }
 
 // HealthURL 返回服务的健康检查地址，没配则报错。
