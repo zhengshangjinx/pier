@@ -32,12 +32,6 @@ const (
 	// 带着 ETag 的条件请求命中 304 时还不计入这个额度。真正要防的是共用出口 IP
 	// 那种情况，所以查失败一律安静地记下，下次到点再试。
 	AutoEvery = 6 * time.Hour
-
-	// notesRunes 是发布说明跟着状态带回界面的长度。
-	//
-	// 状态是每隔一秒轮询一次的东西，整篇说明每次都搬一遍没有意义；界面上那一格
-	// 本来就只摆前几行，要看全文有「查看发布说明」。
-	notesRunes = 800
 )
 
 // StatusOut 是界面上「更新」这一块要的全部信息，一次给全。
@@ -84,7 +78,10 @@ type StatusOut struct {
 	LastCheck string `json:"lastCheck"`
 	// PublishedAt 是这一版的发布日期（2026-10-01），没给时为空。
 	PublishedAt string `json:"publishedAt"`
-	// Notes 是发布说明的前几行。
+	// Notes 是发布说明全文（markdown 原文）。
+	//
+	// 不在这里截断：界面把它整篇渲染进一个能滚的弹窗里，截在哪儿都是替用户
+	// 决定「后面那半不用看」。正文是我们在发布时自己写的，长度有数。
 	Notes string `json:"notes"`
 	// AutoCheck 是「自动检查更新」开关此刻的状态。
 	AutoCheck bool `json:"autoCheck"`
@@ -184,7 +181,7 @@ func (s *Session) Status() StatusOut {
 		Result:       result,
 		LastCheck:    humanTime(checkedAt),
 		PublishedAt:  dayOf(release.Published),
-		Notes:        notesPreview(release.Notes, notesRunes),
+		Notes:        strings.TrimSpace(release.Notes),
 		AutoCheck:    pref.UpdateCheck,
 		CanInstall:   s.why == "",
 	}
@@ -487,25 +484,4 @@ func dayOf(t time.Time) string {
 		return ""
 	}
 	return t.Local().Format(config.LogDateLayout)
-}
-
-// notesPreview 把发布说明截成界面上那一格摆得下的样子。
-//
-// 尽量在整行之间断开，不在半句话中间切；截过就补一个省略号，让人知道后面还有。
-// 最后一条换行离截断处太远时就不管它了——那一行本身就超长，按它截等于把内容
-// 砍掉一大半，还不如老老实实截在字数上。
-func notesPreview(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	cut := string(runes[:max])
-	if i := strings.LastIndex(cut, "\n"); i >= max/2 {
-		cut = cut[:i]
-	}
-	return strings.TrimRight(cut, " \t\r\n") + "…"
 }

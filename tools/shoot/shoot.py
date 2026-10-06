@@ -29,6 +29,7 @@
       见 app.js 里 __pierDemo.update 的分支：downloading / done / skipped /
       failed / checkfail / nostall / latest / result / resultOk）
     / filter <关键词> / quick <all|running|attention>（页头那行搜索与筛选）
+    / notes（发布说明弹窗：整篇 markdown 的排版）
     / readonly <来源>（只读清单：页头说明位、收起的编辑入口与拖动）
       来源留空按「打开清单…」那种算，给「命令行指定」就拍命令行那种说法
     / firstRun <scan>（空清单的第一屏；给「scan」就连扫出来的名单一起拍，

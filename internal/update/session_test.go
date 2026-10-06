@@ -55,6 +55,11 @@ func TestStatusMergesSettingsAndRelease(t *testing.T) {
 	if out.PublishedAt != "2026-10-01" {
 		t.Errorf("发布日期是 %q", out.PublishedAt)
 	}
+	// 说明原样带出去，只削掉首尾空行。界面拿它当 markdown 整篇渲染，
+	// 在这里动它（截断、抹符号）都会让弹窗里显示的东西和发布页上不一致。
+	if out.Notes != "第一行\n第二行" {
+		t.Errorf("发布说明是 %q", out.Notes)
+	}
 	if !strings.HasPrefix(out.LastCheck, "今天 ") {
 		t.Errorf("刚查过，说的是 %q", out.LastCheck)
 	}
@@ -284,28 +289,3 @@ func TestHumanTime(t *testing.T) {
 	}
 }
 
-func TestNotesPreview(t *testing.T) {
-	if got := notesPreview("  \n 短的一段 \n", 800); got != "短的一段" {
-		t.Errorf("短说明被动了：%q", got)
-	}
-	if got := notesPreview("", 800); got != "" {
-		t.Errorf("没有说明时给的是 %q", got)
-	}
-	// 超长时按整行截，末尾补省略号。
-	long := strings.Repeat("一", 100) + "\n" + strings.Repeat("二", 100) + "\n" + strings.Repeat("三", 900)
-	got := notesPreview(long, 300)
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("截过之后没有省略号：%q", got)
-	}
-	if strings.Contains(got, "三") {
-		t.Errorf("截过头了：%q", got)
-	}
-	if !strings.HasSuffix(strings.TrimSuffix(got, "…"), strings.Repeat("二", 100)) {
-		t.Errorf("没在整行之间断开：%q", got)
-	}
-	// 一条长行里没有换行可依时，老老实实按字数截。
-	flat := strings.Repeat("字", 5000)
-	if got := notesPreview(flat, 300); len([]rune(got)) != 301 {
-		t.Errorf("按字数截出来的是 %d 个字符", len([]rune(got)))
-	}
-}

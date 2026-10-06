@@ -228,6 +228,9 @@
   // 而空白的第一屏与扫完之后的那一屏是两件事，都要看一眼。
   var demoFirstRun = false;
   var demoFirstRunScan = false;
+  // 发布说明弹窗开没开。它是偏好设置页里的局部状态（页内开合不落盘），
+  // 从外面点不着，所以演示里留一个初值——截图要拍的正是那一篇的排版。
+  var demoNotesOpen = false;
 
   // 演示数据里「清单已经写掉的那几个端口」，就是 demoState 里那八个服务声明的。
   // 写一份共用的：后端那边 `Existing` 处处都是 cfg.UsedPorts()，同一屏数据里两份
@@ -594,8 +597,36 @@
         error: "", checkError: "",
         result: null,
         lastCheck: "今天 14:32", publishedAt: "2026-10-01",
-        // 发布说明是多行的：这一格要按原样换行显示，不能挤成一行。
-        notes: "这一版加了自动更新：\n· 启动后自己检查新版本，侧栏上会亮一颗点\n· 界面上直接下载、校验、重启安装",
+        // 发布说明是发布页上的 markdown 原文：演示里也按真样子给，
+        // 否则弹窗那几种排版（标题、表格、引用、行内代码）在截图里一个都看不见。
+        notes: [
+          "这一版把更新做完了：查到新版本之后，在界面上直接下载、校验、重启安装。",
+          "",
+          "## 升级方式",
+          "",
+          "**0.2.0 升到这一版要手动装一次**，之后就不再有这个断层。",
+          "",
+          "## 改动",
+          "",
+          "- 启动后自己检查新版本，侧栏底部的版本号会换成主色",
+          "- 下载支持断点续传，`~/.pier/cache/` 里留着半份下次接着下",
+          "- 发布说明改成弹窗里整篇渲染",
+          "",
+          "## 各平台",
+          "",
+          "| 平台 | 认安装位的方式 | 回来 |",
+          "| --- | --- | --- |",
+          "| macOS | 顺着软链找到 `Pier.app` | `open` |",
+          "| Windows | 从 exe 往上找 `pier-gui.exe` | 直接起新的 |",
+          "| Linux | `~/.local/bin/pier-gui` | 原路径 |",
+          "",
+          "> 换文件的是助手，不是 Pier 自己。动手的永远是那份已经在机器上跑通的旧代码。",
+          "",
+          "```",
+          "pier update --check   # 只报，退出码 10 表示有新版本",
+          "pier update           # 真的装",
+          "```"
+        ].join("\n"),
         autoCheck: true, canInstall: true,
         installHint: "这次会替换 /Applications/Pier.app。"
       };
@@ -2508,14 +2539,17 @@
   // vw 那一段负责跟着窗口长，px 那一段是上限：表单的行宽超过 ~1000px
   // 之后标签和输入框离得太远，扫视很累，全屏时铺满整个窗口并不好读。
   //
-  // 宽度归这里一处管，是因为这七个值之间是有相对关系的
-  // （详情 < 挑选 = 扫描 < 表单，抽屉最宽），散在七个组件里改一个就失去平衡。
+  // 宽度归这里一处管，是因为这八个值之间是有相对关系的
+  // （详情 < 说明 < 挑选 = 扫描 < 表单，抽屉最宽），散在八个组件里改一个就失去平衡。
   var SIZE = {
     // 只问一句话的：新建/重命名分组、删除确认。
     modalNarrow: "min(460px, 44vw)",
     modalConfirm: "min(520px, 48vw)",
     // 端口占用详情：字段值都是路径和命令行，要能换行读。
     modalOwner: "min(760px, 62vw)",
+    // 发布说明：整篇 markdown，段与表格都要读得成行；比详情宽一点，
+    // 但不跟着表单走——那里是三列并排，这里只有一列文本。
+    modalNotes: "min(820px, 66vw)",
     // 挑选空闲端口：一屏里尽量多列几个候选。
     modalPicker: "min(920px, 70vw)",
     // 扫描本机端口：与「挑选」同样是几列文字加一颗按钮，宽度对齐它。
@@ -3798,6 +3832,191 @@
   // 这里只做排版：什么算有新版本、能不能替换自己、失败是什么原因，全在
   // internal/update 里定，后端给什么就摆什么。
 
+  // 更新说明是 GitHub release 的正文，按 markdown 写，这里把它渲染成界面。
+  //
+  // 只认说明里真正用到的那几样：标题、粗体、行内代码、列表、引用、分隔线、
+  // 表格、代码块。认不出来的一律当普通段落原样显示——少认一种语法，代价是
+  // 多几个看得见的符号；认错一种，代价是把一句要紧的话渲染成别的意思。
+  //
+  // 出来的是 React 元素，不是 HTML 字符串：整条路上没有一处 innerHTML，
+  // 说明里写什么都不会变成页面结构的一部分。这一条比「支持多少语法」重要。
+  // 链接同理，只留文字不做成可点的——这个界面跑在 webview 里，点一个真链接
+  // 会把界面本身导航走；要看原文有弹窗底部那颗「在浏览器中打开」。
+  // 图片也这样：只留它的说明文字，不去把那个地址拉回来显示——这一页不该为
+  // 一段说明去连发布页以外的地方，断网时也只会多一个加载不出来的框。
+  var MD_INLINE = /(!?\[[^\]\n]*\]\([^)\n]+\)|\*\*[^*\n]+\*\*|`[^`\n]+`)/g;
+
+  function mdInline(text, seed) {
+    var out = [], last = 0, n = 0, m;
+    MD_INLINE.lastIndex = 0;
+    while ((m = MD_INLINE.exec(text)) !== null) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      var tok = m[0], key = seed + "-" + n++;
+      if (tok.slice(0, 2) === "**") {
+        out.push(html`<strong key=${key}>${tok.slice(2, -2)}</strong>`);
+      } else if (tok.charAt(0) === "`") {
+        out.push(html`<code className="dc-md-code" key=${key}>${tok.slice(1, -1)}</code>`);
+      } else {
+        // 链接与图片都只剩方括号里那一段：链接是它自己写的文字，图片是 alt。
+        // 从 "!" 或 "[" 往后一个字符开始取，到第一个 "]" 为止。
+        var from = tok.charAt(0) === "!" ? 2 : 1;
+        out.push(tok.slice(from, tok.indexOf("]")));
+      }
+      last = m.index + tok.length;
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  }
+
+  // mdBlocks 把说明拆成块，返回一组 React 元素，由调用方放进容器里。
+  function mdBlocks(src) {
+    var lines = String(src || "").replace(/\r\n?/g, "\n").split("\n");
+    var out = [], i = 0, k = 0;
+
+    // 这几个判定函数的入参一律叫 ln，不叫 s：gui/app_test.go 按变量名扫
+    // 「界面读了哪个后端字段」，其中 s 是服务结构（panel.ServiceOut），
+    // 拿它去调 trim 会被当成「读了服务上没有的 trim 字段」而报错。
+    var isFence = function (ln) { return /^\s*```/.test(ln); };
+    var isSplit = function (ln) { return /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(ln); };
+    var isHead = function (ln) { return /^\s*#{1,6}\s/.test(ln); };
+    var isQuote = function (ln) { return /^\s*>\s?/.test(ln); };
+    var isBullet = function (ln) { return /^\s*[-*+]\s+/.test(ln); };
+    var isOrdered = function (ln) { return /^\s*\d+\.\s+/.test(ln); };
+    var isRow = function (ln) { return /^\s*\|.*\|\s*$/.test(ln); };
+    var isRule = function (ln) { return /^\s*\|[\s:|-]+\|\s*$/.test(ln); };
+    var cells = function (ln) {
+      var t = ln.trim();
+      if (t.charAt(0) === "|") t = t.slice(1);
+      if (t.charAt(t.length - 1) === "|") t = t.slice(0, -1);
+      return t.split("|").map(function (c) { return c.trim(); });
+    };
+    // 一行是不是某个块的开头。段落要一直收到遇见它为止，否则一段话里
+    // 只要有一行以「-」开头，后面的正文就全被并进那一条列表项里。
+    var isStart = function (n) {
+      var ln = lines[n];
+      if (!ln.trim()) return true;
+      if (isFence(ln) || isSplit(ln) || isHead(ln) || isQuote(ln) || isBullet(ln) || isOrdered(ln)) {
+        return true;
+      }
+      return isRow(ln) && n + 1 < lines.length && isRule(lines[n + 1]);
+    };
+
+    while (i < lines.length) {
+      var line = lines[i];
+      if (!line.trim()) { i++; continue; }
+
+      // 代码块里的符号一个都不解释，原样摆着。
+      if (isFence(line)) {
+        var code = [];
+        i++;
+        while (i < lines.length && !isFence(lines[i])) { code.push(lines[i]); i++; }
+        i++;
+        out.push(html`<pre className="dc-md-pre" key=${"b" + k++}>${code.join("\n")}</pre>`);
+        continue;
+      }
+
+      if (isSplit(line)) {
+        out.push(html`<hr className="dc-md-hr" key=${"b" + k++}/>`);
+        i++;
+        continue;
+      }
+
+      // 标题的层级按原文来，字号在 app.css 里统一压小：这是弹窗正文里的
+      // 标题，不是页面标题，跟页头那几个抢大小没有意义。
+      var h = /^\s*(#{1,6})\s+(.*)$/.exec(line);
+      if (h) {
+        out.push(e("h" + h[1].length, { key: "b" + k++, className: "dc-md-h" },
+          mdInline(h[2], "h" + k)));
+        i++;
+        continue;
+      }
+
+      // 表格要两行才算：本行是 | … |、下一行是 | --- |。只看一行的话，
+      // 正文里一句带竖线的话会被当成表头，而它后面往往什么也没有。
+      // 表格与引用都写在一行里：htm 不会替人收掉换行，模板里那个缩进会变成
+      // 一个真的文本节点，落在 <table> 里就是浏览器给补出来的一个空行。
+      if (isRow(line) && i + 1 < lines.length && isRule(lines[i + 1])) {
+        var head = cells(line);
+        i += 2;
+        var body = [];
+        while (i < lines.length && isRow(lines[i])) { body.push(cells(lines[i])); i++; }
+        out.push(html`<table className="dc-md-table" key=${"b" + k++}><thead><tr>${head.map(function (c, j) {
+          return html`<th key=${j}>${mdInline(c, "th" + k + "-" + j)}</th>`;
+        })}</tr></thead><tbody>${body.map(function (row, j) {
+          return html`<tr key=${j}>${row.map(function (c, jj) {
+            return html`<td key=${jj}>${mdInline(c, "td" + k + "-" + j + "-" + jj)}</td>`;
+          })}</tr>`;
+        })}</tbody></table>`);
+        continue;
+      }
+
+      if (isQuote(line)) {
+        var quote = [];
+        while (i < lines.length && isQuote(lines[i])) {
+          quote.push(lines[i].replace(/^\s*>\s?/, ""));
+          i++;
+        }
+        out.push(html`<blockquote className="dc-md-quote" key=${"b" + k++}>${mdInline(quote.join(" "), "q" + k)}</blockquote>`);
+        continue;
+      }
+
+      if (isBullet(line) || isOrdered(line)) {
+        var ordered = isOrdered(line), items = [];
+        while (i < lines.length) {
+          if (!lines[i].trim()) {
+            // 空行后面接着同型的项，算同一个列表（markdown 的宽松写法）；
+            // 否则这个列表到这里为止。
+            if (i + 1 < lines.length &&
+              (ordered ? isOrdered(lines[i + 1]) : isBullet(lines[i + 1]))) {
+              i++;
+              continue;
+            }
+            break;
+          }
+          var it = (ordered ? /^\s*\d+\.\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/).exec(lines[i]);
+          if (!it) break;
+          items.push(it[1]);
+          i++;
+        }
+        out.push(e(ordered ? "ol" : "ul", { key: "b" + k++, className: "dc-md-list" },
+          items.map(function (t, j) {
+            return html`<li key=${j}>${mdInline(t, "li" + k + "-" + j)}</li>`;
+          })));
+        continue;
+      }
+
+      var para = [line];
+      i++;
+      while (i < lines.length && !isStart(i)) { para.push(lines[i]); i++; }
+      out.push(html`<p className="dc-md-p" key=${"b" + k++}>${mdInline(para.join(" "), "p" + k)}</p>`);
+    }
+    return out;
+  }
+
+  // NotesModal 是「这一版改了什么」那个框。
+  //
+  // 说明整篇摆在卡片里读不了：0.3.3 那一份三千多字，内嵌之后「下载更新」被推到
+  // 一屏之外，而说明本身也没法读——一行一行的 # 与 | 得自己在脑子里还原。
+  // 放进能滚的弹窗里，宽度也够。
+  function NotesModal(props) {
+    var up = props.up;
+    var notes = up && hasVal(up.notes) ? up.notes : "";
+    var footer = html`<${A.Space}>
+      <${A.Button} className="dc-quiet" type="text" onClick=${props.onOpen}>在浏览器中打开<//>
+      ${props.canDownload
+        ? html`<${A.Button} type="primary" onClick=${props.onDownload}>下载更新<//>`
+        : null}
+    <//>`;
+    return html`<${A.Modal} open=${props.open} onCancel=${props.onClose} footer=${footer}
+      width=${SIZE.modalNotes} styles=${{ body: BODY_SCROLL }}
+      title=${"更新内容" + (up && hasVal(up.latest) ? " · " + up.latest : "")}>
+      ${notes ? html`<div className="dc-md">${mdBlocks(notes)}</div>`
+        : html`<${A.Empty} description=${up && hasVal(up.latest)
+          ? "这一版的发布页上没有写说明。"
+          : "还没有查过更新。先点一次「检查更新」，查到的那一版写了什么就摆在这里。"}/>`}
+    <//>`;
+  }
+
   function SettingsPage(props) {
     // 变量名不能改叫别的：gui/app_test.go 的 TestUIFieldNamesExistInBackend
     // 按变量名比对字段，up 上挂的是 update.StatusOut，data 上挂的是 panel.StateOut
@@ -3811,6 +4030,10 @@
     // 不是什么偏好。重开一次回到「通用」，正是应该的。
     var sec = React.useState("general"), tab = sec[0], setTab = sec[1];
     var bs = React.useState(""), busy = bs[0], setBusy = bs[1];
+    // 说明弹窗开没开。和 sec 一样是页面内的临时状态，不落盘。
+    // 初值只在演示模式下可能是真的（见 demoNotesOpen）：这一页一进来就带着
+    // 弹窗，是截图核对排版用的，真界面上从来是关着的。
+    var nt = React.useState(DEMO && demoNotesOpen), notesOpen = nt[0], setNotesOpen = nt[1];
 
     // 每个动作跑完都把状态重读一遍，而不是在前端自己改一份：自己改出来的那份
     // 迟早和后端对不上，而这一页说的每一句都该是后端刚算出来的。
@@ -3870,7 +4093,14 @@
       }
     };
 
-    var showNotes = function () {
+    var download = function () {
+      run("download", function () { return call("updateDownload"); });
+    };
+
+    // 弹窗里那颗「在浏览器中打开」。说明由我们自己渲染，正文里的链接不跟着走，
+    // 想看原文或者看别的版本就得回到发布页；这一条也架在「这一版」上，
+    // 界面传不进来一个地址。
+    var openReleasePage = function () {
       call("updateNotes").catch(function (ex) { props.message.error(ex.message); });
     };
 
@@ -3920,12 +4150,9 @@
         updBody = html`<${React.Fragment}>
           <div className="dc-set-note-head">
             ${up.latest + " 已发布" + (hasVal(up.publishedAt) ? " · " + up.publishedAt : "")}</div>
-          ${hasVal(up.notes) ? html`<div className="dc-set-notes" style=${sm}>${up.notes}</div>` : null}
           <${A.Space}>
             <${A.Button} type="primary" icon=${e(IconDownload)} loading=${busy === "download"}
-              onClick=${function () {
-                run("download", function () { return call("updateDownload"); });
-              }}>${up.error ? "重试下载" : "下载更新"}<//>
+              onClick=${download}>${up.error ? "重试下载" : "下载更新"}<//>
             <${A.Button} onClick=${function () {
               run("skip", function () { return call("updateSkip", up.latest); });
             }}>跳过这个版本<//>
@@ -3948,13 +4175,18 @@
           onClick=${function () {
             run("check", function () { return call("updateCheck"); });
           }}>检查更新<//>
-        <${A.Button} type="text" className="dc-quiet" onClick=${showNotes}>查看发布说明<//>
+        <${A.Button} type="text" className="dc-quiet"
+          onClick=${function () { setNotesOpen(true); }}>查看发布说明<//>
       <//>
     </${React.Fragment}>`;
 
     // 换不了自己的那两种（自己编的、go install 装的）：不摆「下载更新」按钮。
     // 装不上却让人先花几分钟下几十兆，是骗人的；原因就在卡片副标题上。
     var noInstall = up && up.hasUpdate && !up.canInstall;
+
+    // 说明弹窗里那颗「下载更新」出不出现，与卡片里那一颗同进同出：
+    // 已经在下了、已经下好了，都不该再摆一颗一模一样的。
+    var canDownload = !!(up && up.hasUpdate && up.canInstall && !up.done && !up.downloading);
 
     var general = html`<${React.Fragment}>
       <section className="dc-card">
@@ -4173,6 +4405,10 @@
       <div className="dc-set-body">
         ${tab === "appearance" ? appearance : tab === "data" ? manifest : general}
       </div>
+      <${NotesModal} open=${notesOpen} up=${up} canDownload=${canDownload}
+        onClose=${function () { setNotesOpen(false); }}
+        onOpen=${openReleasePage}
+        onDownload=${function () { setNotesOpen(false); download(); }}/>
     </div>`;
   }
 
@@ -4862,6 +5098,7 @@
             var s = find(arg);
             setDel({ open: true, svc: s });
           } else if (kind === "close") {
+            demoNotesOpen = false;
             setLog({ open: false, name: "" });
             setPortOwner({ open: false, name: "" });
             setForm({ open: false, editing: null });
@@ -4870,6 +5107,10 @@
             setScanOpen(false);
           } else if (kind === "select") {
             setSelected(arg || "all");
+          } else if (kind === "notes") {
+            // 发布说明弹窗在偏好设置页里，先站到那一页上，再让它在挂载时就是开的。
+            demoNotesOpen = arg !== false;
+            setSelected(SETTINGS_KEY);
           } else if (kind === "filter") {
             // 搜索框与快捷筛选是受控组件，照着 DOM 敲字既慢又要绕 React 的
             // value setter；截图核对要的只是「筛完之后长什么样」，直接置状态。

@@ -230,10 +230,12 @@ process group.
 - Log drawer, port occupancy (who holds it, kill it from there), and a defined way out when a
   health probe never passes.
 - Preferences has three sections: general (check / download / skip, the automatic-check and
-  notification switches), appearance (light / dark / follow-system), and data. The data section
-  says which manifest is in hand — paste it out as YAML for `pier.yaml`, save it to a file, or
-  open another manifest read-only and switch back to local data at any time — edits the shared
-  environment variables, and cleans up process records that no longer match reality.
+  notification switches), appearance (light / dark / follow-system), and data. Release notes are
+  rendered as the markdown they are written in, inside a dialog — headings, lists, tables and
+  code blocks all come out right, and they no longer push "Download" off the screen. The data
+  section says which manifest is in hand — paste it out as YAML for `pier.yaml`, save it to a
+  file, or open another manifest read-only and switch back to local data at any time — edits the
+  shared environment variables, and cleans up process records that no longer match reality.
 
 The log drawer, SDK management, preferences and the dark theme (the rest are in
 [docs/images](docs/images/README.md)):
@@ -243,6 +245,8 @@ The log drawer, SDK management, preferences and the dark theme (the rest are in
 ![SDK management](docs/images/sdk.png)
 
 ![Preferences](docs/images/settings.png)
+
+![Release notes](docs/images/notes.png)
 
 ![Dark theme](docs/images/dark.png)
 

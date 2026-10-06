@@ -158,6 +158,15 @@ linux-libc-dev:amd64 but it is not installable`，看着像缺包，其实是版
   同一份 `update.StatusOut`。别在两处各起一个定时器：一前一后对不上，圆点会和页面里的
   说法打架。`up.result` 要在界面里单独接一个变量（`res`）再读：`gui/app_test.go` 的字段
   白名单只认顶层 json 标签，`up.result.version` 会被拿去和 `StatusOut` 对，对不上。
+- **发布说明整篇带出来、在弹窗里按 markdown 渲染**：`StatusOut.Notes` 是原文，只削首尾空行，
+  不在后端截断（以前截 800 字，界面上摆着的是一段「## 升级方式」这样的原文，读不成句）。
+  渲染器是 `gui/app.js` 里手写的 `mdBlocks` / `mdInline`，与 `ansiSpans` 同一个理由：
+  这个界面没有打包器、运行时不连 CDN，为一段说明引一个 markdown 库要连带维护
+  `THIRD_PARTY_NOTICES`。**出来的是 React 元素，整条路上没有一处 `innerHTML`**；
+  认不出的语法当普通段落原样显示——多几个看得见的符号，好过把一句话渲染成别的意思。
+  正文里的链接只留文字不做成可点的：界面跑在 webview 里，点一个真链接会把界面本身
+  导航走，要看原文走弹窗底下那颗「在浏览器中打开」（它仍然只开自己认的那一版，
+  见 `NotesURL`）。演示模式下 `__pierDemo.open("notes")` 直接开这一屏，排版靠截图核对。
 - **发版说明里要提一句**：从 0.2.0（更新器之前那一版）升上来的人得手动装一次，
   之后不再有这个断层。
 

@@ -763,8 +763,44 @@ button.dc-group-title:focus-visible {
 .dc-set-note { margin-top: 16px; border-radius: 10px; padding: 12px 14px; }
 .dc-set-note-head { font-weight: 600; margin-bottom: 8px; }
 
-/* 发布说明按原样换行：后端给的就是一段带换行的文字，挤成一行就读不出条目了。 */
-.dc-set-notes { white-space: pre-wrap; line-height: 1.6; margin: 4px 0 14px; }
+/* 发布说明那一篇：弹窗里的 markdown。
+   只做排版，不改文字——说明是发布页上的原文，界面上读到的和那里读到的要是同一句话。
+   字号一律用 em：跟着弹窗体那一号字走，两套主题、两种缩放都不用各调一遍，
+   也就不必在这里写死一个数。 */
+.dc-md { line-height: 1.7; }
+/* 首尾两端的边距收掉：弹窗体自己已经有内边距，再叠一层会显得上不着天下不着地。 */
+.dc-md > :first-child { margin-top: 0; }
+.dc-md > :last-child { margin-bottom: 0; }
+.dc-md-h { font-size: 1.05em; font-weight: 600; margin: 18px 0 8px; line-height: 1.5; }
+.dc-md-p { margin: 0 0 10px; }
+.dc-md-list { margin: 0 0 10px; padding-left: 22px; }
+.dc-md-list li { margin: 2px 0; }
+.dc-md-code,
+.dc-md-pre {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  background: var(--dc-fill);
+  border-radius: 6px;
+}
+.dc-md-code { padding: 1px 5px; }
+/* 代码块里的长行要能横着滚，不能撑宽弹窗：撑宽的是 .ant-modal-body，
+   跟着变宽的还有标题栏和底下的按钮行。 */
+.dc-md-pre { padding: 10px 12px; margin: 0 0 10px; overflow-x: auto; line-height: 1.6; }
+.dc-md-quote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--dc-line);
+  color: var(--dc-text2);
+}
+.dc-md-hr { border: none; border-top: 1px solid var(--dc-line); margin: 16px 0; }
+.dc-md-table { border-collapse: collapse; margin: 0 0 12px; }
+.dc-md-table th,
+.dc-md-table td {
+  border: 1px solid var(--dc-line);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.dc-md-table th { background: var(--dc-fill); font-weight: 600; }
 
 /* 端口挑选里的两张卡在 Space 里排，行距由 Space 给：卡片自己再留一份的话，
    两张卡之间就是 24px，比弹窗里别处的行距宽出一倍。下内边距也要补回来——
